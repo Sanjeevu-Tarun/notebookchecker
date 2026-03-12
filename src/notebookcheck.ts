@@ -875,7 +875,17 @@ function isThumbnail(url: string): boolean {
   // ── ALLOW: NBC hi-res WebP renders of device/Notebooks images ────────────
   // Only the /webp/Notebooks/ subtree contains genuine hi-res renders.
   // /webp/uploads/tx_nbc2/ (handled above) are small comparison icons.
-  if (/\/_processed_\/webp\/Notebooks\//i.test(url)) return false;
+  // EXCEPTION: NBC also serves small-width preview WebPs under /webp/Notebooks/ —
+  // these encode their width as -wNNN-h in the filename (e.g. -q82-w125-h.webp).
+  // Any width < 400px is a thumbnail preview, not a full-res image.
+  if (/\/_processed_\/webp\/Notebooks\//i.test(url)) {
+    // Block narrow previews: -w125-h, -w150-h, -w200-h, etc.
+    if (/-w(\d+)-h\./i.test(url)) {
+      const wMatch = url.match(/-w(\d+)-h\./i);
+      if (wMatch && parseInt(wMatch[1], 10) < 400) return true; // too small
+    }
+    return false;
+  }
 
   const filename = (url.split('/').pop() || '').toLowerCase().replace(/^csm_/, '');
 
@@ -1637,10 +1647,52 @@ export async function scrapeNotebookCheckDevice(pageUrl: string, deviceName?: st
       }
     }
 
+    // ── COMPETITOR GUARD 3: csm_BRAND_DEVICE_..._N_HASH numbered device photos ──
+    // NBC names device angle/test shots as csm_BRAND_DEVICE_[Smartphone_Test_]N_HASH.jpg
+    // e.g. csm_Vivo_V70_Smartphone_Test_2_dcea5566d8.jpg  → Vivo V70 (reviewed) ✓
+    //      csm_Xiaomi_17_Ultra_Test_Smartphone_4_8b63de22e0.jpg → competitor        ✗
+    // The numbered-device-photo pattern in isThumbnail() allows ALL of these through
+    // (it cannot know the reviewed device). So we must check device identity here.
+    // Strategy: strip the trailing _N_HASH to get the device slug, then validate.
+    {
+      const csmFilename = (url.split('/').pop() || '').toLowerCase();
+      // Only applies to csm_ files NOT already handled by Bild_ guard above
+      if (/^\/fileadmin\/_processed_\//i.test(url.replace('https://www.notebookcheck.net',''))
+          && /\/csm_[a-z]/i.test(url)
+          && !/csm_bild_/i.test(csmFilename)) {
+        // Strip csm_ prefix and trailing _HEXHASH.ext to get the device slug portion
+        const bare = csmFilename
+          .replace(/^csm_/, '')
+          .replace(/_[a-f0-9]{6,}\.(jpe?g|png|webp)$/, '');
+        // Only apply this guard when the bare name looks like a device photo
+        // (contains a trailing digit sequence: brand_device_test_N or brand_device_N)
+        if (/[a-z]_\d{1,2}$/.test(bare)) {
+          // Remove trailing _N digit(s) and known noise words to get the device slug
+          const deviceSlug = bare
+            .replace(/_\d{1,2}$/, '')              // strip trailing _N
+            .replace(/_(smartphone|test|bild|photo|review|sample|cam|selfie)_?/gi, '_')
+            .replace(/__+/g, '_')
+            .replace(/^_|_$/g, '');
+          if (deviceSlug.length >= 3 && !deviceFolderMatchesReviewedDevice(deviceSlug.replace(/_/g, ' '))) {
+            return false;
+          }
+        }
+      }
+    }
+
     // ── URL dedup: plain url key (each URL collected at most once across all buckets) ──
     const key = url.toLowerCase();
     if (imgSeen.has(key)) return false;
     if (data.images[bucket].length >= IMG_CAPS[bucket]) return false;
+    // Block explicitly small-width images: NBC encodes width as -wNNN-h or _wNNN_
+    // in WebP and some JPEG filenames. Width < 400 means it's a preview thumbnail.
+    {
+      const wMatch = url.match(/-w(\d+)-h\.|[_-]w(\d+)[_-]h/i);
+      if (wMatch) {
+        const w = parseInt(wMatch[1] || wMatch[2], 10);
+        if (w < 400) return false;
+      }
+    }
     // Basic sanity: must be a known image extension
     if (!/\.(jpe?g|png|webp|gif)(\?.*)?$/i.test(url)) return false;
 
@@ -1756,8 +1808,13 @@ export async function scrapeNotebookCheckDevice(pageUrl: string, deviceName?: st
   function classifyByFilename(url: string): ImgBucket {
     const l = url.toLowerCase();
     const filename = l.split('/').pop() || '';
-    // Strip csm_ prefix and hash suffix for pattern matching
-    const bare = filename.replace(/^csm_/, '').replace(/_[a-f0-9]{8,}\.(jpe?g|png|webp|gif)$/, '');
+    // Strip csm_ prefix, hash suffix, and NBC quality/size encoding for pattern matching
+    // e.g. "vivo_v70_smartphone_test_2-q82-w2560-h.webp" → bare = "vivo_v70_smartphone_test_2"
+    const bare = filename
+      .replace(/^csm_/, '')
+      .replace(/_[a-f0-9]{8,}\.(jpe?g|png|webp|gif)$/, '') // strip _HEXHASH.ext
+      .replace(/-q\d{2,3}(?:-w\d+-h)?(?:-\d+)?\.(jpe?g|png|webp|gif)$/, '') // strip NBC -q82-w2560-h
+      .replace(/\.(jpe?g|png|webp|gif)$/, ''); // strip bare extension
 
     // ── DISPLAY MEASUREMENTS ──────────────────────────────────────────────────
     // NBC oscilloscope waveform images are named RigolDS{N}.jpg or SDS{N}.jpg
@@ -1844,9 +1901,22 @@ export async function scrapeNotebookCheckDevice(pageUrl: string, deviceName?: st
     // ── NUMBERED/ANGLED DEVICE PHOTOS ────────────────────────────────────────
     // NBC device review pages name device photos as:
     //   csm_BRAND_DEVICE_N_HASH.jpg  → bare = "brand_device_n"
+    //   csm_BRAND_DEVICE_Smartphone_Test_N_HASH.jpg → bare = "brand_device_smartphone_test_n"
     //   csm_BRAND_DEVICE_top_HASH.jpg → bare = "brand_device_top"
-    // Also applies to raw /Notebooks/ files with the same pattern.
-    if (/^[a-z0-9]+(?:_[a-z0-9]+)+_\d{1,2}$/i.test(bare)) return 'device';
+    //
+    // Classification:
+    //   _1 suffix (first shot) → device (main hero/marketing shot)
+    //   _2+ suffix (subsequent shots) → deviceAngles (detail/angle views)
+    //   _Smartphone_Test_1 → device (front-facing hero shot)
+    //   _Smartphone_Test_2+ → deviceAngles (angle/port/button detail shots)
+    //
+    // This matches NBC editorial convention: the first image is always the main
+    // product shot, subsequent numbered images are detail/angle views.
+    if (/^[a-z0-9]+(?:_[a-z0-9]+)+_\d{1,2}$/i.test(bare)) {
+      const numMatch = bare.match(/_([\d]+)$/);
+      const shotNum = numMatch ? parseInt(numMatch[1], 10) : 1;
+      return shotNum <= 1 ? 'device' : 'deviceAngles';
+    }
     if (/_(top|bottom|left|right|front|back|side|angle)$/i.test(bare)) return 'deviceAngles';
 
     // NBC "Bild_" series (Samsung reviews and others):
