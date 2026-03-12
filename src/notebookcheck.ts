@@ -740,11 +740,9 @@ export async function searchViaSearXNG(nq: string, oq: string, signal?: AbortSig
   
   debugLog.push({ step: 'start', normalizedQuery: nq, originalQuery: oq });
   
-  // Multiple SearXNG instances for fallback
+  // Only use your own instance - public ones are blocked/rate limited
   const instances = [
     'https://searxng-notebookcheck.onrender.com',
-    'https://searx.be',
-    'https://search.sapti.me',
   ];
 
   // Fire two queries in parallel when nq differs from oq
@@ -766,7 +764,7 @@ export async function searchViaSearXNG(nq: string, oq: string, signal?: AbortSig
     const resp = await sharedAxios.get(searchUrl, {
       params,
       headers: { 'User-Agent': randomUA(), 'Accept': 'application/json' },
-      timeout: 4000,
+      timeout: 15000, // Increased to 15s for cold starts
       signal,
     });
     
