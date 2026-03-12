@@ -572,7 +572,8 @@ const VARIANT_WORDS = [
   'ultra','plus','mini','lite','fe','max','pro','standard','elite','turbo',
   'neo','speed','air','fold','flip','edge','note',
   // ── newly added ──
-  'xl','xr','se','5g','4g','go','compact','slim','zoom',
+  'xl','xr','se','5g','4g','go',
+  // 'compact','slim','zoom' excluded — too common in prose titles
 ] as const;
 type VariantWord = typeof VARIANT_WORDS[number];
 const VARIANT_RE: ReadonlyMap<VariantWord, RegExp> = new Map(
@@ -622,7 +623,9 @@ function scoreCandidate(title: string, url: string, nq: string, originalQuery: s
   // Intentionally excludes 'pro','ultra','max','plus','fold','flip' — those are
   // already soft-penalised by VARIANT_RE (-1200/-1800) so a result can still win
   // if it is the only one available (avoids "no device found" on sparse results).
-  const HARD_REJECT_SUFFIXES: ReadonlySet<string> = new Set(['xl','xr','se','5g','4g','go','compact','slim','zoom']);
+  // 'compact','slim','zoom' intentionally excluded — they appear in review title prose
+  // (e.g. "Compact AI monster") and would reject valid results.
+  const HARD_REJECT_SUFFIXES: ReadonlySet<string> = new Set(['xl','xr','se','5g','4g','go']);
   for (const suffix of HARD_REJECT_SUFFIXES) {
     const re = new RegExp('\\b' + suffix + '\\b', 'i');
     const inQuery  = re.test(q) || re.test(oq);
