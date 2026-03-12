@@ -590,6 +590,14 @@ function scoreCandidate(title: string, url: string, nq: string, originalQuery: s
   if (/[?&](tag|q|word)=/.test(u)) return -1;
   if (/\/(topics|search|smartphones|rss-feed|index)\.\d/i.test(u)) return -1;
 
+  // ── HARD-REJECT: news articles, rumours, complaints — not device reviews ────
+  // NBC device reviews always contain "-review" or "smartphone-review" in the URL
+  // slug.  Any NBC page that lacks this is a news post, blog, or listing page —
+  // never a spec/benchmark review.  Matching on the slug (not the full URL) avoids
+  // false-positive hits on subdirectory names like "/smartphones/".
+  const urlSlugForRejectCheck = (u.split('/').pop() || '');
+  if (!/-review/.test(urlSlugForRejectCheck)) return -1;
+
   const qWords    = q.split(/\s+/).filter(w => w.length > 0);
   const coreWords = qWords.filter(w => !BRAND_TOKENS.has(w));
   // Use core words for matching; drop pure single chars (e.g. stray "a") but keep
