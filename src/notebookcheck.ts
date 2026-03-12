@@ -1553,11 +1553,8 @@ export async function scrapeNotebookCheckDevice(pageUrl: string, deviceName?: st
       }
     }
 
-    // ── URL dedup: keyed by bucket+url ────────────────────────────────────────────
-    // Using bucket:url (not just url) means a URL added to a wrong bucket via
-    // filename-only classification can be re-routed to a better bucket when a
-    // figcaption provides ground truth. Each bucket:url pair is collected only once.
-    const key = `${bucket}:${url.toLowerCase()}`;
+    // ── URL dedup: plain url key (each URL collected at most once across all buckets) ──
+    const key = url.toLowerCase();
     if (imgSeen.has(key)) return false;
     if (data.images[bucket].length >= IMG_CAPS[bucket]) return false;
     // Basic sanity: must be a known image extension
