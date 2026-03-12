@@ -1527,11 +1527,9 @@ export async function scrapeNotebookCheckDevice(pageUrl: string, deviceName?: st
     if (/\/Sonstiges\//i.test(url)) return false; // NBC's "misc assets" folder
     if (/\/flir_/i.test(url.toLowerCase())) return false; // FLIR thermal camera photos — internal test images
 
-    // ── COMPETITOR FOLDER GUARD (universal — all buckets) ───────────────────
+    // ── COMPETITOR GUARD 1: /Notebooks/ folder path ──────────────────────────────
     // NBC stores every device's images under /fileadmin/Notebooks/BRAND/DEVICE_FOLDER/.
-    // Any /Notebooks/ image from a DIFFERENT device's folder is a competitor image
-    // and must be rejected unconditionally, regardless of bucket or filename.
-    // Applied universally: device, deviceAngles, cameraSamples, screenshots, charts, etc.
+    // Any /Notebooks/ image from a DIFFERENT device's folder is a competitor image.
     {
       const notebooksMatch = url.match(/\/fileadmin\/(?:_processed_\/webp\/)?Notebooks\/([^/]+)\/([^/]+)\//i);
       if (notebooksMatch) {
@@ -1540,7 +1538,26 @@ export async function scrapeNotebookCheckDevice(pageUrl: string, deviceName?: st
       }
     }
 
-    const key = url.toLowerCase();
+    // ── COMPETITOR GUARD 2: csm_Bild_ filename-encoded device name ───────────────
+    // csm_ files live under /_processed_/X/Y/ with no /Notebooks/ path, so Guard 1
+    // never fires for them. For the "Bild_" photo series, NBC encodes the full device
+    // name directly in the filename:
+    //   csm_Bild_Samsung_Galaxy_S25_Ultra-0039_HASH.jpg  → S25 Ultra (reviewed) ✓
+    //   csm_Bild_Samsung_Galaxy_A56_5G-0496_HASH.jpg     → A56 5G (competitor)  ✗
+    // Extract the device segment and validate against the reviewed device.
+    {
+      const bildMatch = url.match(/csm_Bild_([A-Za-z0-9_]+)-(?:\d{2,4}|view|intro|overview)_[a-f0-9]{6}/i);
+      if (bildMatch) {
+        const encodedDevice = bildMatch[1].toLowerCase().replace(/_/g, ' ');
+        if (!deviceFolderMatchesReviewedDevice(encodedDevice)) return false;
+      }
+    }
+
+    // ── URL dedup: keyed by bucket+url ────────────────────────────────────────────
+    // Using bucket:url (not just url) means a URL added to a wrong bucket via
+    // filename-only classification can be re-routed to a better bucket when a
+    // figcaption provides ground truth. Each bucket:url pair is collected only once.
+    const key = `${bucket}:${url.toLowerCase()}`;
     if (imgSeen.has(key)) return false;
     if (data.images[bucket].length >= IMG_CAPS[bucket]) return false;
     // Basic sanity: must be a known image extension
