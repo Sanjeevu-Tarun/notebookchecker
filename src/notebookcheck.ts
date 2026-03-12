@@ -602,28 +602,20 @@ function scoreCandidate(title: string, url: string, nq: string, originalQuery: s
 
   if (!checkWords.every(w => combined.includes(w))) return -1;
 
-  // ── HARD-REJECT: model-suffix mismatch ──────────────────────────────────────
-  // If the query does NOT contain a variant suffix but the result DOES, AND that
-  // suffix materially distinguishes a different model, reject outright instead of
-  // just penalising.  This prevents "Pixel 10 Pro XL" from ever winning a query
-  // for "Pixel 10 Pro", "Galaxy S25 Ultra" from winning "Galaxy S25", etc.
+  // ── HARD-REJECT: result has extra model-suffix not in query ─────────────────
+  // ONE-DIRECTIONAL: only reject when the result has a suffix the user did NOT ask
+  // for. Never reject for a *missing* suffix — NBC titles often omit "5G"/"4G"
+  // even for 5G devices; those cases are handled by the soft VARIANT_RE penalty.
   //
-  // We only hard-reject when:
-  //   (a) The suffix appears in the result but NOT in either form of the query, AND
-  //   (b) The suffix is in HARD_REJECT_SUFFIXES — i.e. it identifies a clearly
-  //       distinct product line, not just a marketing tier word that might appear
-  //       in prose ("the pro-grade camera").
-  //
-  // Soft-penalty suffixes (pro, ultra, max, etc.) are still handled below via
-  // VARIANT_RE so they get a large score deduction rather than instant rejection.
-  // This gives them a chance to win if literally no other result is available.
-  const HARD_REJECT_SUFFIXES: ReadonlySet<string> = new Set(['xl','xr','se','5g','4g','go','compact','slim','zoom','plus','fold','flip']);
+  // Intentionally excludes 'pro','ultra','max','plus','fold','flip' — those are
+  // already soft-penalised by VARIANT_RE (-1200/-1800) so a result can still win
+  // if it is the only one available (avoids "no device found" on sparse results).
+  const HARD_REJECT_SUFFIXES: ReadonlySet<string> = new Set(['xl','xr','se','5g','4g','go','compact','slim','zoom']);
   for (const suffix of HARD_REJECT_SUFFIXES) {
     const re = new RegExp('\\b' + suffix + '\\b', 'i');
-    const inQuery    = re.test(q) || re.test(oq);
-    const inResult   = re.test(combined);
-    if (!inQuery && inResult)  return -1; // result has suffix the user didn't ask for → wrong model
-    if (inQuery  && !inResult) return -1; // result is MISSING a suffix the user asked for → wrong model
+    const inQuery  = re.test(q) || re.test(oq);
+    const inResult = re.test(combined);
+    if (!inQuery && inResult) return -1; // result has suffix user didn't ask for → wrong model
   }
 
   let score = 500;
@@ -636,12 +628,12 @@ function scoreCandidate(title: string, url: string, nq: string, originalQuery: s
   if (u.includes('smartphone-review'))                  score += 400;
 
   // ── Exact model-suffix match bonus ──────────────────────────────────────────
-  // Reward results where the query suffix words are all present AND no extra
-  // suffix words are present. This boosts e.g. exact "Pixel 10 Pro" over a
-  // "Pixel 10 Pro Max" result that somehow passed the hard-reject above.
+  // Only fires when the query actually has suffix words. Guards against giving
+  // a free +800 to every plain query where both arrays are empty.
   const qSuffixWords  = [...HARD_REJECT_SUFFIXES].filter(s => new RegExp('\\b' + s + '\\b', 'i').test(q) || new RegExp('\\b' + s + '\\b', 'i').test(oq));
   const resSuffixWords = [...HARD_REJECT_SUFFIXES].filter(s => new RegExp('\\b' + s + '\\b', 'i').test(combined));
-  if (qSuffixWords.length === resSuffixWords.length &&
+  if (qSuffixWords.length > 0 &&
+      qSuffixWords.length === resSuffixWords.length &&
       qSuffixWords.every(s => resSuffixWords.includes(s))) {
     score += 800; // perfect suffix match — reward exact model alignment
   }
