@@ -737,6 +737,8 @@ function extractLinks(html: string, nq: string, oq: string, seen: Set<string>): 
 export async function searchViaSearXNG(nq: string, oq: string, signal?: AbortSignal): Promise<SearchResult[]> {
   const seen = new Set<string>();
   
+  log('info', 'searxng.start', { normalizedQuery: nq, originalQuery: oq });
+  
   // Multiple SearXNG instances for fallback
   const instances = [
     'https://searxng-notebookcheck.onrender.com',
@@ -746,50 +748,144 @@ export async function searchViaSearXNG(nq: string, oq: string, signal?: AbortSig
 
   // Fire two queries in parallel when nq differs from oq
   const queries = [oq, ...(nq !== oq ? [nq] : [])];
+  
+  log('info', 'searxng.queries', { queries, queryCount: queries.length });
 
   const doSearch = async (base: string, q: string) => {
-    const resp = await sharedAxios.get(`${base}/search`, {
-      params: { q: `site:notebookcheck.net ${q} review`, format: 'json', engines: 'google,bing,duckduckgo', categories: 'general' },
+    const searchUrl = `${base}/search`;
+    const params = { 
+      q: `site:notebookcheck.net ${q} review`, 
+      format: 'json', 
+      engines: 'google,bing,duckduckgo', 
+      categories: 'general' 
+    };
+    
+    log('info', 'searxng.request', { base, query: q, fullQuery: params.q });
+    
+    const resp = await sharedAxios.get(searchUrl, {
+      params,
       headers: { 'User-Agent': randomUA(), 'Accept': 'application/json' },
       timeout: 4000,
       signal,
     });
-    return (resp.data?.results || []) as ExternalResultItem[];
+    
+    const results = (resp.data?.results || []) as ExternalResultItem[];
+    
+    log('info', 'searxng.response', { 
+      base, 
+      query: q,
+      rawResultCount: results.length,
+      statusCode: resp.status,
+      hasData: !!resp.data,
+      dataKeys: resp.data ? Object.keys(resp.data) : [],
+      firstResult: results[0] ? { url: results[0].url, title: results[0].title } : null
+    });
+    
+    return results;
   };
 
   // Try each instance until we get results
   for (const base of instances) {
-    if (circuitIsOpen(base)) continue;
+    if (circuitIsOpen(base)) {
+      log('warn', 'searxng.circuit_open', { base });
+      continue;
+    }
 
     try {
       const responses = await Promise.all(queries.map(q => doSearch(base, q)));
       const totalResults = responses.reduce((sum, r) => sum + r.length, 0);
       
+      log('info', 'searxng.parallel_results', { 
+        base, 
+        totalRawResults: totalResults,
+        perQuery: responses.map((r, i) => ({ query: queries[i], count: r.length }))
+      });
+      
       if (totalResults > 0) {
         circuitRecordSuccess(base);
         
         const all: SearchResult[] = [];
+        let droppedCount = 0;
+        let dropReasons: Record<string, number> = {};
+        
         for (const items of responses) {
           for (const item of items) {
             const url   = (item.url || '').trim();
             const title = (item.title || '').trim();
-            if (!url.includes('notebookcheck.net') || !/\.\d{4,}\.0\.html/.test(url) || seen.has(url)) continue;
-            if (/[?&](tag|q|word)=/.test(url) || /\/(Topics|Search|Smartphones|RSS|index)\.\d/i.test(url)) continue;
+            
+            // Track why results get dropped
+            if (!url.includes('notebookcheck.net')) {
+              droppedCount++;
+              dropReasons['not_notebookcheck'] = (dropReasons['not_notebookcheck'] || 0) + 1;
+              log('debug', 'searxng.drop', { reason: 'not_notebookcheck', url, title });
+              continue;
+            }
+            
+            if (!/\.\d{4,}\.0\.html/.test(url)) {
+              droppedCount++;
+              dropReasons['wrong_url_format'] = (dropReasons['wrong_url_format'] || 0) + 1;
+              log('debug', 'searxng.drop', { reason: 'wrong_url_format', url, title });
+              continue;
+            }
+            
+            if (seen.has(url)) {
+              droppedCount++;
+              dropReasons['duplicate'] = (dropReasons['duplicate'] || 0) + 1;
+              continue;
+            }
+            
+            if (/[?&](tag|q|word)=/.test(url) || /\/(Topics|Search|Smartphones|RSS|index)\.\d/i.test(url)) {
+              droppedCount++;
+              dropReasons['tag_or_listing_page'] = (dropReasons['tag_or_listing_page'] || 0) + 1;
+              log('debug', 'searxng.drop', { reason: 'tag_or_listing_page', url, title });
+              continue;
+            }
+            
             const sc = scoreCandidate(title || url, url, nq, oq);
-            if (sc < 0) continue;
+            if (sc < 0) {
+              droppedCount++;
+              dropReasons['score_negative'] = (dropReasons['score_negative'] || 0) + 1;
+              log('debug', 'searxng.drop', { reason: 'score_negative', score: sc, url, title });
+              continue;
+            }
+            
             seen.add(url);
             all.push({ url, title: title || url, score: sc });
+            log('debug', 'searxng.keep', { score: sc, url, title });
           }
         }
+        
+        log('info', 'searxng.final', { 
+          base,
+          rawResults: totalResults,
+          droppedResults: droppedCount,
+          dropReasons,
+          finalResults: all.length,
+          topResults: all.slice(0, 3).map(r => ({ score: r.score, url: r.url, title: r.title }))
+        });
+        
         return all;
+      } else {
+        log('warn', 'searxng.zero_raw_results', { base, queries });
       }
     } catch (e) {
       if ((e as Error).name !== 'AbortError') {
         circuitRecordFailure(base);
-        log('debug', 'searxng.failed', { base, err: (e as Error).message });
+        log('error', 'searxng.failed', { 
+          base, 
+          err: (e as Error).message,
+          errName: (e as Error).name,
+          stack: (e as Error).stack?.split('\n').slice(0, 5).join(' | ')
+        });
       }
     }
   }
+  
+  log('error', 'searxng.all_instances_failed', { 
+    query: nq,
+    instances,
+    message: 'All instances failed or returned 0 results'
+  });
   
   return [];
 }
