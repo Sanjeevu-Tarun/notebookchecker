@@ -1865,12 +1865,14 @@ export async function scrapeNotebookCheckDevice(pageUrl: string, deviceName?: st
     // Portrait Studio shots are photos taken BY the phone, not product shots of the device.
     // e.g. Portrait_Studio_Samsung_Galaxy_S25_Ultra_4.jpg
     if (/^portrait[_\-]studio/i.test(filename)) return 'cameraSamples';
-    // Date-stamped camera roll files: YYYYMMDD_HHMMSS.jpg or YYYYMMDD_N.jpg
-    // These are photos taken BY the phone (Vivo, OnePlus, Samsung etc. save with this naming)
-    // e.g. 20260228_135613.jpg, 20260301_141950.jpg
-    if (/^\d{8}[_T]\d/.test(filename)) return 'cameraSamples';
-    // Unix timestamp filenames (13-digit ms timestamp): 1708123456789.jpg
-    if (/^\d{13}/.test(filename)) return 'cameraSamples';
+    // Date-stamped files: YYYYMMDD_HHMMSS.jpg
+    // In NBC reviews, these are DEVICE ANGLE PHOTOS taken by NBC in their lab
+    // (showing ports, buttons, angles under controlled lighting).
+    // Camera samples in NBC always use Foto_{slug}_{scene} naming — never date-stamps.
+    // Exception handled by sectionBucketOverride() in Pass 2 for software-section screenshots.
+    if (/^\d{8}[_T]\d/.test(filename)) return 'deviceAngles';
+    // Unix timestamp filenames: also device shots
+    if (/^\d{13}/.test(filename)) return 'deviceAngles';
 
 
     // ── CHART INTERCEPT (must run BEFORE the generic Foto_* branch) ──────────
@@ -2107,22 +2109,100 @@ export async function scrapeNotebookCheckDevice(pageUrl: string, deviceName?: st
     addImage(aHref, bucket);
   });
 
-  // ── PASS 2: Non-figure <a href> images (device gallery, charts, etc.) ──
-  // Covers images that NBC renders outside <figure> (e.g. older inline photo blocks,
-  // zoom-level camera comparisons, selfie shots, display test images).
+  // ── PASS 2: Non-figure <a href> images — section-aware classification ──────────
   //
-  // NBC serves two kinds of "full-res" images that live in _processed_/:
-  //   A) /fileadmin/_processed_/webp/Notebooks/…/{filename}-q82-w-h1600.webp
-  //      → These ARE the best available version (NBC's own hi-res WebP renders).
-  //        Only the /Notebooks/ subtree — NOT /uploads/tx_nbc2/ (size comparison icons).
-  //   B) /fileadmin/_processed_/{hash}/csm_{filename}_{hash2}.jpg  (the "large" csm)
-  //      → Sometimes the ONLY version of a device photo (e.g. Test_1 angle).
-  //        When the <a href> points to a larger csm_ and there is no raw file,
-  //        we must accept this as the best available version.
+  // NBC's review page has a predictable section structure. We use the nearest
+  // preceding h2 heading to determine the semantic context of each bare image link.
   //
-  // Strategy: allow _processed_/webp/Notebooks/ images through unconditionally (they are
-  // genuine full-res). For csm_ images, allow them only when their caption
-  // clearly identifies the bucket (camera sample / screenshot / device angle).
+  // Section → image type mapping (from actual NBC HTML structure):
+  //   "Case / Chassis / Design / Build / Housing" → deviceAngles (lab hardware shots)
+  //   "Software / Sustainability"                 → screenshots  (OS/app UI shots)
+  //   "Display"                                   → deviceAngles for date-stamped files
+  //                                                  (NBC places device angles in display section)
+  //   "Camera"                                    → cameraSamples (Foto_* files)
+  //   "Performance / Battery / Emissions"         → device/charts (benchmark section)
+  //   Article header (before first h2)            → device (hero shot)
+  //
+  // Date-stamped YYYYMMDD_* files are ALWAYS device angle photos in NBC reviews.
+  // NBC camera samples always use Foto_{slug}_{scene} naming.
+  //
+  // For csm_ images: allow when caption OR section context gives confident bucket.
+  // ── Build section map: element → nearest preceding h2 section heading ──────────
+  // NBC review pages are divided into h2 sections. We assign each image link
+  // to its section so we can override filename-based classification with the
+  // ground-truth context the editor intended.
+  //
+  // Section keyword → semantic bucket override:
+  //   case / chassis / housing / design / build / communication / operation →
+  //     bare date-stamped images = deviceAngles (lab hardware shots)
+  //   software / sustainability →
+  //     bare images = screenshots (OS/UI shots)
+  //   display / screen →
+  //     bare date-stamped images = deviceAngles (device placed next to display equipment)
+  //   camera / photo →
+  //     Foto_* images = cameraSamples (already handled by filename; section confirms)
+  //   performance / battery / emissions / benchmarks →
+  //     no override (charts already classified by filename)
+  //
+  // "Date-stamped" = YYYYMMDD_HHMMSS.jpg — these are ALWAYS device angle/hardware photos
+  // in NBC reviews. Camera samples always use Foto_{slug}_{scene} naming on NBC.
+
+  // Build a section position index ONCE: [{pos, heading}] sorted by pos.
+  // Each <a> element's section = the heading with the largest pos <= element's pos.
+  // This is O(n log n) total vs O(n * depth) for DOM walking.
+  // cheerio elements have a .startIndex / sourceCodeLocation property when
+  // the parser is run with location tracking — but since we don't enable that,
+  // we use the order of elements in the document as a proxy for position.
+  //
+  // Strategy: collect all h2 elements and all image <a> elements in document order
+  // using a single pass over ALL elements, then map each <a> to its nearest preceding h2.
+  const sectionMap = new Map<import('domhandler').Element, string>();
+  {
+    let currentSection = '';
+    // Walk every element in document order using cheerio's * selector
+    $('h2, a[href]').each((_, el) => {
+      if ($(el).is('h2')) {
+        currentSection = $(el).text().toLowerCase();
+      } else {
+        // It's an <a href> — record the current section at this point in the document
+        sectionMap.set(el as import('domhandler').Element, currentSection);
+      }
+    });
+  }
+
+  function getSectionForElement(el: import('domhandler').Element): string {
+    return sectionMap.get(el) ?? '';
+  }
+
+  function sectionBucketOverride(section: string, filename: string): ImgBucket | null {
+    const s = section.toLowerCase();
+    const f = filename.toLowerCase();
+    const isDateStamped = /^\d{8}[_T]\d/.test(f);
+    const isFoto = /^(foto|photo)_/i.test(f);
+
+    // Case/chassis/housing section: ALL images are hardware/device photos
+    if (/\b(case|chassis|housing|design|build|communication|operation|features|waterproof|connectivity)\b/i.test(s)) {
+      if (isDateStamped) return 'deviceAngles';
+      if (isFoto) return 'cameraSamples'; // Foto_* in case section = camera samples still
+      return null; // let filename classify other types
+    }
+
+    // Software section: ALL bare images are screenshots
+    if (/\b(software|sustainability|updates|android|os\b)/i.test(s)) {
+      if (/screenshot/i.test(f) || /^\d{8}[_T]\d/.test(f)) return 'screenshots';
+      // csm_ files in software section without "screenshot" name could be UI shots
+      return null;
+    }
+
+    // Display section: date-stamped files are device angle photos placed here by NBC editors
+    if (/\b(display|screen|oled|amoled|panel|brightness)\b/i.test(s)) {
+      if (isDateStamped) return 'deviceAngles';
+      return null;
+    }
+
+    return null;
+  }
+
   $('a[href]').each((_, el) => {
     const href = $(el).attr('href') || '';
     if (!href) return;
@@ -2141,44 +2221,39 @@ export async function scrapeNotebookCheckDevice(pageUrl: string, deviceName?: st
       || norm($el.closest('figure').find('figcaption').text())
       || ($el.find('img').first().attr('alt') ?? '');
 
-    // For _processed_/webp/Notebooks/ URLs: these are NBC's genuine hi-res WebP renders.
-    // Allow them through regardless of the thumbnail check.
-    // NOTE: /webp/uploads/tx_nbc2/ are size-comparison widget icons — NOT hi-res renders.
-    // addImage() will reject those via the tx_nbc2 block regardless.
     const isWebpFullRes = /\/_processed_\/webp\/Notebooks\//i.test(resolved);
-
-    // For csm_ links that have no raw counterpart: only accept when caption
-    // gives us a confident bucket (avoids collecting random thumbnails).
     const isCsmLarge = isThumbnail(resolved) && !isWebpFullRes;
 
-    const bucket: ImgBucket = classifyByCaption(caption) ?? classifyByFilename(resolved);
+    // ── Section-aware override: use h2 context to correct classification ─────
+    const filename = resolved.split('/').pop() || '';
+    const section  = getSectionForElement(el as import('domhandler').Element);
+    const sectionOverride = sectionBucketOverride(section, filename);
+
+    // Caption is always ground truth first
+    const captionBucket = classifyByCaption(caption);
+    const bucket: ImgBucket = captionBucket ?? sectionOverride ?? classifyByFilename(resolved);
 
     if (isCsmLarge) {
-      // Only accept csm_ links when we have a clear caption-driven bucket
-      // or the filename clearly identifies the type (RigolDS, Calman, Screenshot,
-      // device angle shots like Vivo_X300_Test_1, or date-stamped device shots).
-      const hasClearCaption = classifyByCaption(caption) !== null;
-      const fn = resolved.split('/').pop() || '';
+      // Accept csm_ only when caption, section override, or clear filename confirms the type
+      const hasClearCaption   = captionBucket !== null;
+      const hasSectionContext = sectionOverride !== null;
+      const fn = filename;
       const fnBare = fn.toLowerCase().replace(/^csm_/, '').replace(/_[a-f0-9]{8,}\.(jpe?g|png|webp|gif)$/, '');
       const hasClearFilename =
-        /^(rigolds|sds)\d+/i.test(fn)                         // display measurements
-        || /^cal\s?man|^farbchart/i.test(fn)                  // colour calibration
+        /^(rigolds|sds)\d+/i.test(fn)
+        || /^cal\s?man|^farbchart/i.test(fn)
         || /colorchecker|grayscale|srgb_gamut|sat_sweeps/i.test(fn)
-        || /screenshot/i.test(fn)                              // screenshots
-        || /_software_/i.test(fn)                              // software screenshots
-        || /^(img_?|dsc_?|pxl_?|sam_?|\d{8}[_T]?)/i.test(fnBare)   // camera roll originals
-        || /^(foto|photo)_/i.test(fnBare)                     // NBC Foto_slug_scene shots
-        || /^portrait[_\-]studio/i.test(fnBare)               // Portrait Studio camera samples
-        || /_test_\d+/i.test(fn)                              // device angle: Vivo_X300_Test_1
-        // ↓ KEY FIX: numbered device photos — BRAND_DEVICE_N_HASH.jpg
-        // e.g. csm_google_pixel_10_pro_xl_1_6ae836d9c8.jpg (bare: google_pixel_10_pro_xl_1)
+        || /screenshot/i.test(fn)
+        || /_software_/i.test(fn)
+        || /^\d{8}[_T]\d/i.test(fnBare)                      // date-stamped = device angle
+        || /^(foto|photo)_/i.test(fnBare)
+        || /^portrait[_\-]studio/i.test(fnBare)
+        || /_test_\d+/i.test(fn)
         || /^[a-z0-9]+(?:_[a-z0-9]+)+_\d{1,2}$/i.test(fnBare)
-        // ↓ Named angle shots — csm_google_pixel_10_pro_xl_top_HASH.jpg
         || /_(top|bottom|left|right|front|back|side|angle)$/i.test(fnBare)
-        // ↓ NBC "Bild_" series — Bild_DEVICE-NNNN_HASH.jpg or Bild_DEVICE-View_HASH.jpg
         || /^bild_[a-z0-9_]+-\d{2,4}$/i.test(fnBare)
         || /^bild_[a-z0-9_]+-view$/i.test(fnBare);
-      if (!hasClearCaption && !hasClearFilename) return;
+      if (!hasClearCaption && !hasSectionContext && !hasClearFilename) return;
     }
 
     addImage(resolved, bucket);
@@ -2354,6 +2429,12 @@ export async function scrapeNotebookCheckDevice(pageUrl: string, deviceName?: st
       if (parts.length < 2) return false;
 
       // We build slug candidates for BOTH old and new format interpretations.
+      // Also handle TYPE D: Foto_{Scene_Words}_{Brand}_{Model}.jpg
+      // where the brand token appears mid-parts — we extract the brand-onwards tail.
+      let brandIdx = -1;
+      for (let i = 1; i < parts.length; i++) {
+        if (BRAND_TOKENS.has(parts[i].toLowerCase())) { brandIdx = i; break; }
+      }
       const slugCandidates = [
         parts.slice(1).join('').toLowerCase(),       // full tail joined
         parts.slice(2).join('').toLowerCase(),       // skip first word
@@ -2361,6 +2442,11 @@ export async function scrapeNotebookCheckDevice(pageUrl: string, deviceName?: st
         parts[1].toLowerCase(),                      // just part[1]: the device slug
         parts.slice(2).join('_').toLowerCase(),      // keep underscores from part[2]+
         parts.slice(1).join('_').toLowerCase(),      // full tail with underscores
+        // TYPE D brand-anchored tail: Foto_Low_Light_Vivo_V70 → parts[3:]="vivo_v70" → "vivov70"
+        ...(brandIdx > 0 ? [
+          parts.slice(brandIdx).join('').toLowerCase(),   // "vivov70"
+          parts.slice(brandIdx).join('_').toLowerCase(),  // "vivo_v70"
+        ] : []),
       ].filter(s => s.length >= 2);
 
       // Normalise a slug to pure lowercase alphanumeric for comparison
@@ -2422,8 +2508,10 @@ export async function scrapeNotebookCheckDevice(pageUrl: string, deviceName?: st
         if (/^fotos_kamera/i.test(fNoExt)) return true;
 
         // ── TYPE B: Generic camera-roll filenames (no device name in filename) ─
-        // Covers: IMG_*, IMG*, DSC_*, DSC*, PXL_*, SAM_*, date-stamped, unix timestamps
-        if (/^(img_?|dsc_?|dcim|pxl_|sam_|pro_|\d{8}[_T]?|\d{13})/i.test(filename)) return true;
+        // Covers: IMG_*, DSC_*, PXL_*, SAM_*
+        // NOTE: date-stamped YYYYMMDD_* files are NBC lab shots (deviceAngles), not cameraSamples.
+        // They should never reach here since classifyByFilename now routes them to deviceAngles.
+        if (/^(img_?|dsc_?|dcim|pxl_|sam_|pro_)/i.test(filename)) return true;
 
         // ── TYPE C/D: Foto_{slug}_{scene}.jpg  OR  Photo_{slug}_{scene}.jpg ───
         // Both "Foto" and "Photo" prefixes are used by NBC across different brands
