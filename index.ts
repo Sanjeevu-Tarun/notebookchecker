@@ -37,7 +37,7 @@ import {
 const app = express();
 app.use(cors());
 
-app.get('/api/health', (_, res) => res.json({ status: 'ok', version: 'FIX-v4-1773391480' }));
+app.get('/api/health', (_, res) => res.json({ status: 'ok', version: 'FIX-v5-SEARCHFIX' }));
 
 // ─────────────────────────────────────────────────────────────────────────────
 // /api/phone — NotebookCheck ONLY (fast version, no GSMArena)

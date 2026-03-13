@@ -385,7 +385,7 @@ export async function getEntry(url: string): Promise<IndexEntry | null> {
 // Uses a Redis-cached search index (flat list of {url, title, slug}) to avoid
 // loading the full entries object on every request.
 
-const SEARCH_INDEX_KEY = `nbc:index:v3:search_index`;
+const SEARCH_INDEX_KEY = `nbc:index:v4:search_index`;
 
 export async function rebuildSearchIndex(): Promise<void> {
   const entries = await loadEntries();
