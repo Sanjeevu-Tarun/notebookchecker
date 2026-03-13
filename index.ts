@@ -361,19 +361,29 @@ app.get('/api/nbc/direct-debug', async (req, res) => {
     const nq = normalizeQuery(q);
     const primaryQuery = nq !== oq ? nq : oq;
 
-    // Hit NBC search directly — same URL the code uses
-    const searchUrl = `https://www.notebookcheck.net/Search.8222.0.html?word=${encodeURIComponent(primaryQuery)}`;
+    // Hit NBC search directly via POST — NBC uses TYPO3 Indexed Search.
+    // GET ?word= is silently ignored by TYPO3; the correct field is
+    // tx_indexedsearch_pi2[search][sword] submitted as POST form data.
+    const NBC_SEARCH_URL = 'https://www.notebookcheck.net/Search.8222.0.html';
+    const postBody = new URLSearchParams({
+      'tx_indexedsearch_pi2[search][sword]': primaryQuery,
+      'tx_indexedsearch_pi2[action]': 'search',
+    }).toString();
+    const searchUrl = NBC_SEARCH_URL; // for the response payload (method is POST)
     const fetchMs0 = Date.now();
     let html = '';
     let fetchError = '';
     let httpStatus = 0;
 
     try {
-      const resp = await axios.get(searchUrl, {
+      const resp = await axios.post(NBC_SEARCH_URL, postBody, {
         headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-          'Accept': 'text/html,application/xhtml+xml',
-          'Referer': 'https://www.notebookcheck.net/',
+          'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          'Content-Type':    'application/x-www-form-urlencoded',
+          'Accept':          'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.9',
+          'Referer':         'https://www.notebookcheck.net/',
+          'Origin':          'https://www.notebookcheck.net',
         },
         timeout: 8000,
       });
@@ -431,6 +441,8 @@ app.get('/api/nbc/direct-debug', async (req, res) => {
     return res.json({
       query: { original: oq, normalized: nq, primaryUsed: primaryQuery },
       searchUrl,
+      searchMethod: 'POST',
+      searchBody: postBody,
       httpStatus,
       fetchError: fetchError || null,
       fetchMs,
