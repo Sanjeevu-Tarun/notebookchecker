@@ -123,6 +123,64 @@ async function rSetNX(k: string, v: string, ttl: number): Promise<boolean> {
   } catch { return false; }
 }
 
+async function rKeys(pattern: string): Promise<string[]> {
+  const { url, token } = rBase();
+  const r = await _rax.get(`${url}/keys/${encodeURIComponent(pattern)}`,
+    { headers: { Authorization: `Bearer ${token}` } });
+  return r.data?.result ?? [];
+}
+
+// ── RECOVER DELETED REVIEW URLS ───────────────────────────────────────────────
+// If purgeLibraryDuplicates accidentally deleted internal review entries,
+// this function recovers them from the resolve cache (nbc:review_resolve:* keys).
+// The cache stores: libraryUrl → reviewUrl, so we can re-add all review URLs.
+export async function recoverDeletedReviewUrls(): Promise<{ recovered: number; alreadyPresent: number }> {
+  const entries = await loadEntries();
+  const cacheKeys = await rKeys('nbc:review_resolve:*');
+
+  let recovered = 0, alreadyPresent = 0;
+
+  for (const ck of cacheKeys) {
+    let reviewUrl: string;
+    try {
+      reviewUrl = await rGet(ck) as string;
+    } catch { continue; }
+
+    // Only care about keys that resolved to a review URL
+    if (!reviewUrl || !/-review-/i.test(reviewUrl)) continue;
+
+    if (entries[reviewUrl]) {
+      alreadyPresent++;
+      continue;
+    }
+
+    // Re-add the review entry. Derive title from the slug:
+    // "Samsung-Galaxy-S25-Ultra-review-The-AI-phone....968346.0.html"
+    // → split on "-review-" → take first part → replace hyphens → "Samsung Galaxy S25 Ultra"
+    const slug = reviewUrl.split('/').pop() || '';
+    const rawTitle = slug.split('-review-')[0].replace(/-/g, ' ').replace(/\.\d+\.0\.html$/, '').trim();
+    const title = rawTitle.split(' ').map((w: string) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+
+    entries[reviewUrl] = {
+      url: reviewUrl,
+      title,
+      brand: extractBrand(title),
+      slug,
+      discoveredAt: new Date().toISOString(),
+      status: 'pending',
+      retries: 0,
+    };
+    recovered++;
+  }
+
+  if (recovered > 0) {
+    await saveEntries(entries);
+    await rebuildSearchIndex();
+  }
+
+  return { recovered, alreadyPresent };
+}
+
 // ── ENTRY STORE ───────────────────────────────────────────────────────────────
 
 async function loadEntries(): Promise<Record<string, IndexEntry>> {
@@ -521,23 +579,25 @@ export async function purgeLibraryDuplicates(): Promise<{ purged: number; kept: 
 
   const toDelete: string[] = [];
   for (const [url, e] of Object.entries(entries)) {
-    // 1. Junk title — article snippets have very long titles
+    // Only touch non-review URLs — NEVER delete internal review entries
+    if (/-review-/i.test(url)) continue;
+
+    // 1. Junk title — library entries with article snippet titles (>80 chars)
+    //    e.g. "86% Smartphone with superlatives has its eye on the prize - Realme GT 7 Pro review..."
     if (e.title.length > 80) {
       toDelete.push(url);
       reasons.junkTitle++;
       continue;
     }
 
-    // 2. Library duplicate — non-review URL whose slug prefix matches a review entry
-    if (!/-review-/i.test(url)) {
-      const slug = url.split('/').pop() || '';
-      // Library slug prefix = everything before the numeric ID
-      // e.g. "Samsung-Galaxy-S25-Ultra.975474.0.html" → "samsung-galaxy-s25-ultra"
-      const prefix = slug.toLowerCase().replace(/\.\d+\.0\.html$/, '');
-      if (reviewPrefixes.has(prefix)) {
-        toDelete.push(url);
-        reasons.libraryDuplicate++;
-      }
+    // 2. Library duplicate — library URL whose slug prefix matches a review entry
+    //    e.g. "Samsung-Galaxy-S25-Ultra.975474.0.html" → prefix "samsung-galaxy-s25-ultra"
+    //    matches review "Samsung-Galaxy-S25-Ultra-review-....968346.0.html"
+    const slug = url.split('/').pop() || '';
+    const prefix = slug.toLowerCase().replace(/\.\d+\.0\.html$/, '');
+    if (reviewPrefixes.has(prefix)) {
+      toDelete.push(url);
+      reasons.libraryDuplicate++;
     }
   }
 

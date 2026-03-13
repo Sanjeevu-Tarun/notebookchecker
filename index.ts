@@ -34,6 +34,7 @@ import {
   migrateToReviewUrls,
   resetMigration,
   purgeLibraryDuplicates,
+  recoverDeletedReviewUrls,
   type CrawlPageResult,
   type MigrateResult,
 } from './src/notebookcheck_index';
@@ -859,6 +860,19 @@ app.get('/api/index/purge-library-duplicates', async (req, res) => {
     const result = await purgeLibraryDuplicates();
     return res.json({ success: true, ...result,
       message: `Purged ${result.purged} entries (${result.reasons.libraryDuplicate} library dupes, ${result.reasons.junkTitle} junk titles). ${result.kept} entries remain.`
+    });
+  } catch (e: any) {
+    return res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// /api/index/recover-review-urls — recover any review URLs accidentally deleted by purge
+// Scans nbc:review_resolve:* cache keys in Redis and re-adds missing review entries
+app.get('/api/index/recover-review-urls', async (req, res) => {
+  try {
+    const result = await recoverDeletedReviewUrls();
+    return res.json({ success: true, ...result,
+      message: `Recovered ${result.recovered} deleted review entries. ${result.alreadyPresent} were already present.`
     });
   } catch (e: any) {
     return res.status(500).json({ success: false, error: e.message });
