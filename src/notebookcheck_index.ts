@@ -37,6 +37,12 @@ const NBC_REVIEWS_BASE = 'https://www.notebookcheck.net/Reviews.55.0.html?&items
 // We skip any URL that already exists from SOURCE A.
 const NBC_CHRONO_BASE = 'https://www.notebookcheck.net/Chronological-sorting.2690.0.html';
 
+// SOURCE C — Smartphone listing (phones only, tagArray[]=10, typeArray[]=1)
+// page 0 = no ns_page param, page 1+ = &ns_page=N
+// This page surfaces phones that may not appear in Source A (no internal review yet)
+// but are listed under the smartphones category.
+const NBC_SMARTPHONE_BASE = 'https://www.notebookcheck.net/Smartphone.305158.0.html?&tagArray%5B%5D=10&typeArray%5B%5D=1&id=305158';
+
 // ── TYPES ─────────────────────────────────────────────────────────────────────
 
 export type ScrapeStatus = 'pending' | 'scraping' | 'done' | 'error';
@@ -463,6 +469,85 @@ export async function crawlReviewsPage(page: number): Promise<CrawlPageResult> {
   return { page, phonesFound: found.length, totalUrls, newUrls,
     done: pageIsEmpty, nextPage: page + 1,
     durationMs: Date.now() - t0, source: 'reviews' };
+}
+
+// ── SOURCE C: Smartphone listing (phones, resolve library → review URLs) ────────
+// Same resolve logic as Source B — every non-review URL is resolved to its
+// internal NBC review URL before being stored.
+export async function crawlSmartphonePage(page: number): Promise<CrawlPageResult> {
+  const t0 = Date.now();
+  const url = page === 0 ? NBC_SMARTPHONE_BASE : `${NBC_SMARTPHONE_BASE}&ns_page=${page}`;
+  const html = await fetchHtml(url);
+  const $ = cheerio.load(html);
+
+  const found: Array<{ url: string; title: string }> = [];
+  const seen = new Set<string>();
+
+  $('a[href]').each((_, el) => {
+    let href = $(el).attr('href') || '';
+    if (href.startsWith('/')) href = 'https://www.notebookcheck.net' + href;
+    href = href.split('?')[0];
+    if (!href.includes('notebookcheck.net')) return;
+    if (!/\.\d{4,}\.0\.html$/.test(href)) return;
+    if (seen.has(href.toLowerCase())) return;
+    seen.add(href.toLowerCase());
+
+    const title = ($(el).attr('title') || $(el).text().trim() || '')
+      .replace(/^\d+%\s*/, '').replace(/\s+/g, ' ').trim().slice(0, 120);
+    const cleanTitle = title.split(' - ')[0].split(' review')[0].trim();
+    if (cleanTitle.length < 4) return;
+    found.push({ url: href, title: cleanTitle });
+  });
+
+  const rawLinks = (html.match(/\.notebookcheck\.net\/[^"']+\.\d+\.0\.html/g) || []).length;
+  const pageIsEmpty = rawLinks === 0;
+
+  const entries = await loadEntries();
+
+  // Build review prefix set — skip devices already covered by a review URL
+  const reviewPrefixes = new Set<string>();
+  for (const u of Object.keys(entries)) {
+    if (/-review-/i.test(u)) {
+      const slug = u.split('/').pop() || '';
+      reviewPrefixes.add(slug.toLowerCase().split('-review-')[0]);
+    }
+  }
+
+  // Filter to only new, uncovered URLs
+  const toResolve: Array<{ url: string; title: string }> = [];
+  for (const { url: u, title } of found) {
+    if (entries[u]) continue;
+    const slug = u.split('/').pop() || '';
+    const prefix = slug.toLowerCase().replace(/\.\d+\.0\.html$/, '');
+    if (reviewPrefixes.has(prefix)) continue;
+    toResolve.push({ url: u, title });
+  }
+
+  let newUrls = 0;
+  for (let i = 0; i < toResolve.length; i += RESOLVE_CONCURRENCY) {
+    const batch = toResolve.slice(i, i + RESOLVE_CONCURRENCY);
+    await Promise.all(batch.map(async ({ url: libraryUrl, title }) => {
+      try {
+        const resolvedUrl = /-review-/i.test(libraryUrl)
+          ? libraryUrl
+          : await resolveToReviewUrl(libraryUrl);
+        const finalUrl = resolvedUrl || libraryUrl;
+        if (entries[finalUrl]) return;
+        entries[finalUrl] = makeEntry(finalUrl, title);
+        newUrls++;
+      } catch {
+        if (!entries[libraryUrl]) { entries[libraryUrl] = makeEntry(libraryUrl, title); newUrls++; }
+      }
+    }));
+  }
+
+  if (newUrls > 0) await saveEntries(entries);
+  const totalUrls = Object.keys(entries).length;
+  await rSet(PROGRESS_KEY, { page, totalUrls, startedAt: new Date().toISOString(), updatedAt: new Date().toISOString() }, LOCK_TTL);
+
+  return { page, phonesFound: found.length, totalUrls, newUrls,
+    done: pageIsEmpty, nextPage: page + 1,
+    durationMs: Date.now() - t0, source: 'smartphone' };
 }
 
 // ── SOURCE B: Chronological listing (library/external fallback) ───────────────

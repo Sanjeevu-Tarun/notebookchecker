@@ -17,6 +17,7 @@ import {
   crawlSync,
   crawlOnePage,
   crawlReviewsPage,
+  crawlSmartphonePage,
   getQueueStats,
   getIndexEntries,
   scrapeIndexedDevice,
@@ -738,6 +739,20 @@ app.get('/api/index/crawl-reviews-page', async (req, res) => {
     rebuildSearchIndex().catch(() => {}); // fire and forget
     return res.json({ success: true, result,
       hint: result.done ? 'No more review pages — SOURCE A complete' : `Call ?page=${result.nextPage} for next page` });
+  } catch (e: any) {
+    return res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// /api/index/crawl-smartphone-page — crawl one page of SOURCE C (Smartphone listing)
+// ?page=0 (no ns_page) then ?page=1, ?page=2 ...
+app.get('/api/index/crawl-smartphone-page', async (req, res) => {
+  const page = parseInt(req.query.page as string || '0');
+  try {
+    const result = await crawlSmartphonePage(page);
+    rebuildSearchIndex().catch(() => {});
+    return res.json({ success: true, result,
+      hint: result.done ? 'No more smartphone pages — SOURCE C complete' : `Call ?page=${result.nextPage} for next page` });
   } catch (e: any) {
     return res.status(500).json({ success: false, error: e.message });
   }
@@ -1468,12 +1483,13 @@ app.get('/recrawl', (_, res) => {
   .flush-bar{display:flex;align-items:center;gap:10px;padding:14px 18px;background:var(--surface);border:1px solid #3a1520;border-radius:10px;margin-bottom:1.5rem}
   .flush-bar p{flex:1;font-size:12px;color:var(--muted);line-height:1.5}
   .flush-bar strong{display:block;font-size:13px;color:#ff7a8a;font-weight:600;margin-bottom:3px}
-  .panels{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px}
+  .panels{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;margin-bottom:14px}
   .panel{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:12px}
   .panel-head{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;color:#fff}
   .tag{font-size:10px;font-weight:600;padding:2px 8px;border-radius:20px;letter-spacing:0.04em}
   .tag-a{background:#0c2e1a;color:var(--green)}
   .tag-b{background:#0c1e35;color:var(--blue)}
+  .tag-c{background:#1a1000;color:var(--amber)}
   .dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;background:var(--border)}
   .dot.run{background:var(--green);box-shadow:0 0 6px var(--green);animation:blink 1s ease infinite}
   .dot.done{background:var(--green)}
@@ -1509,7 +1525,7 @@ app.get('/recrawl', (_, res) => {
   .footer-bar p{flex:1;font-size:12px;color:var(--muted)}
   .footer-bar strong{display:block;font-size:12px;color:var(--text);margin-bottom:2px}
   #flushmsg,#postmsg{font-size:11px;color:var(--muted)}
-  @media(max-width:700px){.panels{grid-template-columns:1fr}}
+  @media(max-width:900px){.panels{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
@@ -1575,6 +1591,29 @@ app.get('/recrawl', (_, res) => {
       <button class="btn btn-stop" id="btnStopB" style="display:none" onclick="stopB()">■ Stop</button>
     </div>
     <div class="log" id="logB"></div>
+  </div>
+  <div class="panel">
+    <div class="panel-head">
+      <div class="dot" id="dotC"></div>
+      Source C — smartphone listing
+      <span class="tag tag-c">phones only</span>
+    </div>
+    <div class="metrics">
+      <div class="metric"><div class="metric-val" id="cPages">0</div><div class="metric-lbl">pages</div></div>
+      <div class="metric"><div class="metric-val" id="cTotal">0</div><div class="metric-lbl">total index</div></div>
+      <div class="metric"><div class="metric-val" id="cNew">0</div><div class="metric-lbl">new added</div></div>
+    </div>
+    <div class="bar-wrap">
+      <div class="bar-track"><div class="bar-fill" style="background:var(--amber)" id="barC"></div></div>
+      <div class="bar-info"><span id="labelC">not started</span><span id="pctC"></span></div>
+    </div>
+    <div class="ctl">
+      <label>start page</label>
+      <input type="number" id="cStart" value="0" min="0">
+      <button class="btn btn-go" id="btnStartC" onclick="startC()">▶ Start</button>
+      <button class="btn btn-stop" id="btnStopC" style="display:none" onclick="stopC()">■ Stop</button>
+    </div>
+    <div class="log" id="logC"></div>
   </div>
 </div>
 
@@ -1720,6 +1759,53 @@ async function startB() {
 }
 
 function stopB() { bStop = true; logLine('logB', 'stop requested…', 'warn'); }
+
+let cStop = false;
+
+async function startC() {
+  cStop = false;
+  let page = parseInt(document.getElementById('cStart').value) || 0;
+  let pages = 0, newTotal = 0, lastIdx = 0, empty = 0;
+  document.getElementById('btnStartC').disabled = true;
+  document.getElementById('btnStopC').style.display = 'inline-flex';
+  setDot('dotC', 'run');
+  logLine('logC', 'Source C started (smartphone listing)…', 'ok');
+
+  while (!cStop) {
+    document.getElementById('cStart').value = page;
+    try {
+      const r = await fetch('/api/index/crawl-smartphone-page?page=' + page);
+      if (!r.ok) { logLine('logC', 'p' + page + ' HTTP ' + r.status, 'err'); await sleep(2500); page++; empty++; if (empty >= 5) break; continue; }
+      const d = await r.json();
+      if (!d.success) { logLine('logC', 'p' + page + ': ' + (d.error || 'error'), 'err'); await sleep(2500); page++; empty++; if (empty >= 5) break; continue; }
+      const res = d.result;
+      pages++; newTotal += res.newUrls; lastIdx = res.totalUrls;
+      if (res.phonesFound === 0) { empty++; } else { empty = 0; }
+      document.getElementById('cPages').textContent = pages;
+      document.getElementById('cTotal').textContent = lastIdx;
+      document.getElementById('cNew').textContent = newTotal;
+      const pct = Math.min(Math.round(pages / 150 * 100), 99);
+      document.getElementById('barC').style.width = pct + '%';
+      document.getElementById('pctC').textContent = 'p' + page;
+      document.getElementById('labelC').textContent = 'p' + page + ' — ' + res.phonesFound + ' found, ' + res.newUrls + ' new';
+      logLine('logC', 'p' + page + ' → ' + res.phonesFound + ' phones, ' + res.newUrls + ' new (index: ' + res.totalUrls + ')', res.phonesFound > 0 ? 'ok' : 'info');
+      if (res.done) { logLine('logC', 'Source C complete (server says done).', 'ok'); break; }
+      if (empty >= 5) { logLine('logC', '5 consecutive empty pages — Source C complete.', 'ok'); break; }
+      page++;
+      await sleep(DELAY);
+    } catch(e) { logLine('logC', 'p' + page + ' error: ' + e.message, 'err'); await sleep(3000); page++; empty++; if (empty >= 5) break; }
+  }
+
+  document.getElementById('barC').style.width = '100%';
+  document.getElementById('pctC').textContent = cStop ? 'stopped' : 'done';
+  document.getElementById('labelC').textContent = cStop ? 'stopped at p' + page : 'done';
+  setDot('dotC', cStop ? '' : 'done');
+  document.getElementById('btnStartC').disabled = false;
+  document.getElementById('btnStartC').textContent = '▶ Resume';
+  document.getElementById('btnStopC').style.display = 'none';
+}
+
+function stopC() { cStop = true; logLine('logC', 'stop requested…', 'warn'); }
 
 async function doPurge() {
   const btn = document.getElementById('btnPurge');
