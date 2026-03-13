@@ -31,7 +31,9 @@ import {
   extractPhoneUrls,
   rebuildSearchIndex,
   searchIndex,
+  migrateToReviewUrls,
   type CrawlPageResult,
+  type MigrateResult,
 } from './src/notebookcheck_index';
 
 const app = express();
@@ -823,6 +825,27 @@ app.get('/api/index/reset-errors', async (req, res) => {
     return res.json({ success: true, resetCount: count, queue: await getQueueStats() });
   } catch (e: any) {
     return res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// /api/index/migrate-review-urls — one-shot: upgrade all library URLs to NBC internal review URLs
+// Safe to call multiple times — already-resolved entries are skipped via Redis cache.
+// Run this once after deploying the crawl fix to fix all existing index entries without re-crawling.
+app.get('/api/index/migrate-review-urls', async (req, res) => {
+  try {
+    res.setHeader('Content-Type', 'text/plain');
+    res.setHeader('Transfer-Encoding', 'chunked');
+    res.flushHeaders();
+
+    const result = await migrateToReviewUrls((progress) => {
+      res.write(JSON.stringify(progress) + '\n');
+    });
+
+    res.write(JSON.stringify({ success: true, done: true, ...result }) + '\n');
+    res.end();
+  } catch (e: any) {
+    res.write(JSON.stringify({ success: false, error: e.message }) + '\n');
+    res.end();
   }
 });
 

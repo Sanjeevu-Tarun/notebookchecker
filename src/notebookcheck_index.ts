@@ -158,6 +158,62 @@ async function fetchHtml(url: string, ms = 15000): Promise<string> {
   throw new Error('fetchHtml: retries exhausted');
 }
 
+// ── REVIEW URL RESOLVER ───────────────────────────────────────────────────────
+// The Chronological page always links to the NBC *library* page for a device
+// (e.g. Samsung-Galaxy-S25-Ultra.975474.0.html — specs + aggregated external reviews).
+// When NBC has written their own full internal review, the library page links to it
+// in its "Reviews" section as the first item (e.g. "89.4% Samsung Galaxy S25 Ultra review...").
+// That internal review URL (slug contains "-review-") has the full benchmarks, images,
+// and detailed measurements that the scraper needs.
+//
+// This function fetches the library page and returns the NBC internal review URL if found,
+// or the original library URL if no internal review exists yet.
+// Result is cached in Redis (nbc:review_resolve:URL) with a 7-day TTL to avoid
+// refetching the library page on every crawl.
+
+const RESOLVE_TTL = 7 * 24 * 3600; // 7 days
+
+async function resolveToReviewUrl(libraryUrl: string): Promise<string> {
+  const ck = `nbc:review_resolve:${libraryUrl}`;
+  // Check cache first
+  try {
+    const cached = await rGet(ck) as string;
+    if (cached) return cached;
+  } catch { /* miss */ }
+
+  let html: string;
+  try {
+    html = await fetchHtml(libraryUrl, 10000);
+  } catch {
+    return libraryUrl; // on fetch error, fall back to library URL
+  }
+
+  const $ = cheerio.load(html);
+  let reviewUrl: string | null = null;
+
+  // The library page lists NBC's own review as the first entry in the reviews table/list.
+  // It looks like: <a href="/Samsung-Galaxy-S25-Ultra-review-....968346.0.html">89.4% ...</a>
+  // We scan ALL links on the page for a notebookcheck URL that:
+  //   (a) contains "-review-" in the slug
+  //   (b) ends with .NNN.0.html
+  // The FIRST such link is always the NBC internal review.
+  $('a[href]').each((_, el) => {
+    if (reviewUrl) return; // already found
+    let href = $(el).attr('href') || '';
+    if (href.startsWith('/')) href = 'https://www.notebookcheck.net' + href;
+    if (!href.startsWith('https://www.notebookcheck.net')) return;
+    href = href.split('?')[0];
+    if (!/-review-/i.test(href)) return;
+    if (!/\.\d{4,}\.0\.html$/.test(href)) return;
+    reviewUrl = href;
+  });
+
+  const result = reviewUrl ?? libraryUrl;
+  // Cache the resolved URL
+  await rSet(ck, result, RESOLVE_TTL);
+  return result;
+}
+
 // ── BRAND ─────────────────────────────────────────────────────────────────────
 
 const KNOWN_BRANDS = [
@@ -189,10 +245,8 @@ function extractBrand(title: string): string {
 
 export function extractPhoneUrls(html: string): Array<{ url: string; title: string }> {
   const $ = cheerio.load(html);
-  // Map: normalised device name → { url, title, isReview }
-  // Keeps only one entry per device, always preferring the NBC internal review URL
-  // (slug contains "-review-") over the external/library aggregator page.
-  const best = new Map<string, { url: string; title: string; isReview: boolean }>();
+  const out: Array<{ url: string; title: string }> = [];
+  const seen = new Set<string>();
 
   $('a[href]').each((_, el) => {
     let href = $(el).attr('href') || '';
@@ -204,39 +258,24 @@ export function extractPhoneUrls(html: string): Array<{ url: string; title: stri
     if (!/\.\d{4,}\.0\.html$/.test(href)) return;
 
     const slug = href.split('/').pop() || '';
-    // Skip listing/navigation pages
     if (/^(Reviews|Smartphones|Search|Topics|RSS|index|Notebooks|News|Smartphone|Library|Comparison|Chronological)\./i.test(slug)) return;
     if (/-Series\./i.test(slug)) return;
 
-    // The Chronological page labels each entry with its type in the parent element text.
-    // "(Smartphone)" = keep. "(Tablet)", "(Notebook)", "(Gaming)" etc. = skip.
+    // The Chronological page labels each entry type in the parent element text.
+    // Keep only "(Smartphone)" entries — tablets, notebooks, gaming etc. are skipped.
     const parentText = $(el).parent().text();
     if (!/\(Smartphone\)/i.test(parentText)) return;
+
+    if (seen.has(href.toLowerCase())) return;
+    seen.add(href.toLowerCase());
 
     const title = ($(el).attr('title') || $(el).text().trim() || '').replace(/\s+/g, ' ').trim().slice(0, 200);
     if (title.length < 5) return;
 
-    // NBC internal reviews have "-review-" in their slug (e.g. Samsung-Galaxy-S25-Ultra-review-...).
-    // External/library aggregator pages do not (e.g. Samsung-Galaxy-S25-Ultra.975474.0.html).
-    // Internal reviews always have full specs, benchmarks and images — always prefer them.
-    const isReview = /-review-/i.test(slug);
-
-    // Dedup key: normalised title (lowercased, no punctuation).
-    // Both "Samsung-Galaxy-S25-Ultra-review-..." and "Samsung-Galaxy-S25-Ultra.975474.0.html"
-    // share the same device name → only keep the review URL.
-    const key = title.toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim();
-
-    const existing = best.get(key);
-    if (!existing) {
-      best.set(key, { url: href, title, isReview });
-    } else if (isReview && !existing.isReview) {
-      // Upgrade: replace library page with the full NBC review
-      best.set(key, { url: href, title, isReview });
-    }
-    // If existing is already a review, keep it (first-seen review wins)
+    out.push({ url: href, title });
   });
 
-  return Array.from(best.values()).map(({ url, title }) => ({ url, title }));
+  return out;
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -265,7 +304,26 @@ export async function crawlOnePage(page: number): Promise<CrawlPageResult> {
 
   const entries = await loadEntries();
   let newUrls = 0;
-  for (const { url: u, title } of found) {
+
+  // For each discovered library URL, resolve it to the NBC internal review URL.
+  // Library pages (e.g. Samsung-Galaxy-S25-Ultra.975474.0.html) link to the full
+  // internal review in their "Reviews" section — that URL has complete specs and benchmarks.
+  // We run resolutions in parallel (capped at 5 concurrent) to keep crawl time reasonable.
+  // Results are Redis-cached for 7 days so subsequent crawls skip the fetch entirely.
+  const CONCURRENCY = 5;
+  const resolved: Array<{ url: string; title: string }> = [];
+  for (let i = 0; i < found.length; i += CONCURRENCY) {
+    const batch = found.slice(i, i + CONCURRENCY);
+    const resolvedBatch = await Promise.all(
+      batch.map(async ({ url: u, title }) => {
+        const finalUrl = await resolveToReviewUrl(u).catch(() => u);
+        return { url: finalUrl, title };
+      })
+    );
+    resolved.push(...resolvedBatch);
+  }
+
+  for (const { url: u, title } of resolved) {
     if (!entries[u]) {
       entries[u] = { url: u, title, brand: extractBrand(title), slug: u.split('/').pop() || '',
         discoveredAt: new Date().toISOString(), status: 'pending', retries: 0 };
@@ -441,16 +499,15 @@ function wordBoundaryRe(word: string): RegExp {
 
 // Score an index entry title against a user query.
 // Titles in the index are clean: "Vivo X300 Pro", "Samsung Galaxy S26 Ultra".
+// The stored URL is always the NBC internal review URL (resolved at crawl time by
+// resolveToReviewUrl), so scoring only needs to find the best title match.
 // Rules:
 //   1. ALL query words must appear in the title (hard reject if any missing)
 //   2. Exact match → 10000, title-contains-query → 8000
-//   3. +3000 bonus if the URL slug contains "-review-" (NBC internal review page)
-//      This ensures the full-spec NBC review always beats the external/library page
-//      for the same device when both are in the index (defence-in-depth alongside
-//      the dedup logic in extractPhoneUrls).
-//   4. Each variant word in the title that the query DIDN'T ask for → -2000 penalty
-//   5. Shorter title = small length bonus (more precise match)
-function scoreIndexMatch(entryTitle: string, query: string, entryUrl = ''): number {
+//   3. Each variant word in the title that the query DIDN'T ask for → -2000 penalty
+//      (e.g. query "samsung s25" vs title "Samsung Galaxy S25 Ultra" → -2000 for "ultra")
+//   4. Shorter title = small length bonus (more precise match)
+function scoreIndexMatch(entryTitle: string, query: string): number {
   const d = cleanIndexTitle(entryTitle);
   const q = query.toLowerCase().trim();
   const qWords = q.split(/\s+/).filter((w: string) => w.length > 1);
@@ -460,14 +517,9 @@ function scoreIndexMatch(entryTitle: string, query: string, entryUrl = ''): numb
   // Hard reject: any query word missing from the title
   if (!qWords.every((w: string) => wordIn(w, d))) return -1;
 
-  // Strong bonus for NBC internal review pages (slug has "-review-").
-  // Applied to ALL score paths so the internal review always beats the external/library
-  // aggregator page for the same device, even on exact-match scores.
-  const reviewBonus = /-review-/i.test(entryUrl) ? 3000 : 0;
-
   // Exact or contains match — highest confidence
-  if (d === q) return 10000 + reviewBonus;
-  if (d.includes(q)) return 8000 + reviewBonus;
+  if (d === q) return 10000;
+  if (d.includes(q)) return 8000;
 
   // Penalise extra variant words in title that query didn't include
   const variants = ['ultra', 'pro', 'plus', 'mini', 'lite', 'fe', 'max', 'edge', 'standard', 'turbo', 'fold', 'flip', 'xl', 'xr', 'se', '5g', '4g', 'go', 'slim', 'zoom', 'compact'];
@@ -479,7 +531,7 @@ function scoreIndexMatch(entryTitle: string, query: string, entryUrl = ''): numb
   // Bonus for shorter title (fewer extra words = closer match)
   const lengthBonus = Math.max(0, 500 - d.length * 5);
 
-  return 5000 + reviewBonus - penalty + lengthBonus;
+  return 5000 - penalty + lengthBonus;
 }
 
 export async function searchIndex(q: string): Promise<{ url: string; title: string } | null> {
@@ -501,7 +553,7 @@ export async function searchIndex(q: string): Promise<{ url: string; title: stri
   let bestScore = -1;
 
   for (const entry of flat) {
-    const score = scoreIndexMatch(entry.title, normalized, entry.url);
+    const score = scoreIndexMatch(entry.title, normalized);
     if (score > bestScore) {
       bestScore = score;
       best = { url: entry.url, title: entry.title };
@@ -574,6 +626,60 @@ export async function clearIndex(): Promise<void> {
 
 export async function resetCrawlLock(): Promise<void> {
   await rDel(LOCK_KEY); await rDel(PROGRESS_KEY);
+}
+
+// ── ONE-SHOT MIGRATION: upgrade all existing library URLs to internal review URLs ──
+// The Chronological page always stores library URLs (e.g. Samsung-Galaxy-S25-Ultra.975474.0.html).
+// This migration fetches each library page, finds the NBC internal review link (-review- slug),
+// and replaces the stored URL in the index. Safe to run multiple times — already-resolved
+// entries are skipped (their resolve cache returns instantly from Redis).
+//
+// Progress: streams back { done, total, upgraded, alreadyReview, noReview, errors } per batch.
+// Call GET /api/index/migrate-review-urls to run it.
+//
+export interface MigrateResult {
+  total: number; upgraded: number; alreadyReview: number; noReview: number; errors: number; durationMs: number;
+}
+
+export async function migrateToReviewUrls(onProgress?: (p: MigrateResult) => void): Promise<MigrateResult> {
+  const t0 = Date.now();
+  const entries = await loadEntries();
+  const urls = Object.keys(entries);
+  const total = urls.length;
+
+  let upgraded = 0, alreadyReview = 0, noReview = 0, errors = 0;
+
+  const CONCURRENCY = 8;
+  for (let i = 0; i < urls.length; i += CONCURRENCY) {
+    const batch = urls.slice(i, i + CONCURRENCY);
+    await Promise.all(batch.map(async (oldUrl) => {
+      try {
+        // Already an internal review URL — nothing to do
+        if (/-review-/i.test(oldUrl)) { alreadyReview++; return; }
+
+        const newUrl = await resolveToReviewUrl(oldUrl);
+
+        if (newUrl === oldUrl) { noReview++; return; } // no NBC review found yet
+
+        // Swap the entry: delete old key, insert under new URL
+        if (!entries[newUrl]) {
+          entries[newUrl] = { ...entries[oldUrl], url: newUrl, slug: newUrl.split('/').pop() || '' };
+        }
+        delete entries[oldUrl];
+        upgraded++;
+      } catch {
+        errors++;
+      }
+    }));
+
+    if (onProgress) onProgress({ total, upgraded, alreadyReview, noReview, errors, durationMs: Date.now() - t0 });
+  }
+
+  await saveEntries(entries);
+  // Rebuild search index so it reflects the new URLs
+  await rebuildSearchIndex();
+
+  return { total, upgraded, alreadyReview, noReview, errors, durationMs: Date.now() - t0 };
 }
 
 export async function validateIndexUrl(url: string): Promise<{ url: string; valid: boolean; h1?: string; error?: string; checkMs: number }> {
