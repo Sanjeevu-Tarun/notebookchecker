@@ -353,7 +353,7 @@ app.get('/api/nbc/direct-debug', async (req, res) => {
   const t0 = Date.now();
 
   try {
-    const { normalizeQuery, scoreCandidate } = await import('./src/notebookcheck');
+    const { normalizeQuery } = await import('./src/notebookcheck');
     const axios = (await import('axios')).default;
     const cheerio = await import('cheerio');
 
@@ -388,7 +388,7 @@ app.get('/api/nbc/direct-debug', async (req, res) => {
 
     // Parse all links from the response
     const allLinks: any[] = [];
-    const scoredLinks: any[] = [];
+    const articleLinks: any[] = [];
 
     if (html) {
       const $ = cheerio.load(html);
@@ -403,18 +403,30 @@ app.get('/api/nbc/direct-debug', async (req, res) => {
         // Show ALL NBC links — even ones that fail the article-ID filter
         allLinks.push({ url: fullUrl, text: text.slice(0, 80) });
 
-        // Only score article links
+        // Article links: must have 4+ digit article ID in URL
         if (!/\.\d{4,}\.0\.html/.test(fullUrl)) return;
         if (/[?&](tag|q|word|id)=/.test(fullUrl)) return;
         if (/\/(Topics|Search|Smartphones|RSS|index)\.\d/i.test(fullUrl)) return;
         if (!text || text.length < 3) return;
 
-        const score = (scoreCandidate as Function)(text, fullUrl, nq, oq);
-        scoredLinks.push({ score, url: fullUrl, title: text.slice(0, 100), passed: score >= 0 });
+        // Simple keyword match — does the URL/title contain query words?
+        const qWords = primaryQuery.toLowerCase().split(/\s+/).filter((w: string) => w.length > 1);
+        const combined = (text + ' ' + fullUrl).toLowerCase();
+        const matchCount = qWords.filter((w: string) => combined.includes(w)).length;
+        const isReview = /review|smartphone-review/.test(fullUrl);
+
+        articleLinks.push({
+          url: fullUrl,
+          title: text.slice(0, 120),
+          matchedWords: matchCount,
+          totalWords: qWords.length,
+          isReview,
+          wouldBeUsed: matchCount >= Math.ceil(qWords.length / 2),
+        });
       });
     }
 
-    scoredLinks.sort((a: any, b: any) => b.score - a.score);
+    articleLinks.sort((a: any, b: any) => (b.matchedWords - a.matchedWords) || (b.isReview ? 1 : -1));
 
     return res.json({
       query: { original: oq, normalized: nq, primaryUsed: primaryQuery },
@@ -427,9 +439,9 @@ app.get('/api/nbc/direct-debug', async (req, res) => {
         length: html.length,
         snippet: html.slice(0, 300),   // first 300 chars — shows if it's the right page
       },
-      allNBCLinks: allLinks.slice(0, 20),       // all NBC links found (pre-filter)
-      scoredArticleLinks: scoredLinks.slice(0, 10), // scored article links
-      winner: scoredLinks.find((l: any) => l.passed) || null,
+      allNBCLinks: allLinks.slice(0, 20),
+      articleLinks: articleLinks.slice(0, 10),
+      winner: articleLinks.find((l: any) => l.wouldBeUsed) || null,
     });
   } catch (e: any) {
     return res.status(500).json({ error: e.message, totalMs: Date.now() - t0 });
