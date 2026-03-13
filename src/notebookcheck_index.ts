@@ -134,13 +134,13 @@ export interface ScrapeQueueStats {
 // url → IndexEntry  (canonical store)
 const indexStore = new Map<string, IndexEntry>();
 
-// crawl state
+// crawl + bulk state — use _state object so getCrawlInProgress() getter always reads live value
 let lastCrawlStats: CrawlStats | null = null;
-let crawlInProgress = false;
-
-// bulk scrape state
-let bulkScrapeActive = false;
-let bulkScrapeAborted = false;
+const _state = {
+  crawlInProgress:   false,
+  bulkScrapeActive:  false,
+  bulkScrapeAborted: false,
+};
 
 // ── INDEX VERSION ─────────────────────────────────────────────────────────────
 // Bump this when IndexEntry shape changes to invalidate Redis cache
@@ -161,13 +161,16 @@ const KNOWN_BRANDS = [
 
 function extractBrand(title: string): string {
   const titleLower = title.toLowerCase();
-  // Try exact brand match (case-insensitive, word boundary)
   for (const brand of KNOWN_BRANDS) {
     if (titleLower.includes(brand.toLowerCase())) return brand;
   }
-  // Fallback: first word of title that's longer than 2 chars
-  const firstWord = title.trim().split(/\s+/)[0];
-  return firstWord && firstWord.length > 2 ? firstWord : 'Unknown';
+  // Fallback: first capitalised word that isn't a generic word
+  const genericWords = new Set(['smartphone', 'phone', 'review', 'test', 'the', 'a', 'an', 'with', 'for', 'new', 'best', 'top', 'chic', 'slim']);
+  for (const word of title.trim().split(/\s+/)) {
+    const w = word.toLowerCase().replace(/[^a-z]/g, '');
+    if (w.length >= 2 && !genericWords.has(w) && /^[A-Z]/.test(word)) return word;
+  }
+  return 'Unknown';
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -356,7 +359,7 @@ export interface CrawlOptions {
 }
 
 export async function crawlNBCSmartphoneIndex(opts: CrawlOptions = {}): Promise<CrawlStats> {
-  if (crawlInProgress) {
+  if (_state.crawlInProgress) {
     return lastCrawlStats ?? {
       totalPages: 0, totalUrls: 0, newUrls: 0, crawlMs: 0,
       lastCrawledAt: new Date().toISOString(), error: 'Crawl already in progress'
@@ -374,7 +377,7 @@ export async function crawlNBCSmartphoneIndex(opts: CrawlOptions = {}): Promise<
     }
   }
 
-  crawlInProgress = true;
+  _state.crawlInProgress = true;
   const t0 = Date.now();
   let totalUrls = 0;
   let newUrls = 0;
@@ -482,7 +485,7 @@ export async function crawlNBCSmartphoneIndex(opts: CrawlOptions = {}): Promise<
     lastCrawlStats = stats;
     return stats;
   } finally {
-    crawlInProgress = false;
+    _state.crawlInProgress = false;
   }
 }
 
@@ -618,7 +621,7 @@ export interface BulkScrapeResult {
 }
 
 export async function bulkScrapeAll(opts: BulkScrapeOptions = {}): Promise<BulkScrapeResult> {
-  if (bulkScrapeActive) {
+  if (_state.bulkScrapeActive) {
     throw new Error('Bulk scrape already in progress. Call abortBulkScrape() first.');
   }
 
@@ -630,8 +633,8 @@ export async function bulkScrapeAll(opts: BulkScrapeOptions = {}): Promise<BulkS
     onProgress,
   } = opts;
 
-  bulkScrapeActive = true;
-  bulkScrapeAborted = false;
+  _state.bulkScrapeActive = true;
+  _state.bulkScrapeAborted = false;
 
   const t0 = Date.now();
   let processed = 0, succeeded = 0, failed = 0, skipped = 0;
@@ -651,7 +654,7 @@ export async function bulkScrapeAll(opts: BulkScrapeOptions = {}): Promise<BulkS
   let queueIndex = 0;
 
   async function worker(): Promise<void> {
-    while (!bulkScrapeAborted) {
+    while (!_state.bulkScrapeAborted) {
       // Grab next URL
       const url = queue[queueIndex++];
       if (!url) break; // queue exhausted
@@ -673,7 +676,7 @@ export async function bulkScrapeAll(opts: BulkScrapeOptions = {}): Promise<BulkS
       });
 
       // Delay between requests to be polite to NBC
-      if (!bulkScrapeAborted && queueIndex < queue.length) {
+      if (!_state.bulkScrapeAborted && queueIndex < queue.length) {
         await new Promise(r => setTimeout(r, delayMs));
       }
     }
@@ -689,8 +692,8 @@ export async function bulkScrapeAll(opts: BulkScrapeOptions = {}): Promise<BulkS
     }
     await Promise.all(workers);
   } finally {
-    bulkScrapeActive = false;
-    bulkScrapeAborted = false;
+    _state.bulkScrapeActive = false;
+    _state.bulkScrapeAborted = false;
   }
 
   const elapsedMs = Date.now() - t0;
@@ -700,15 +703,13 @@ export async function bulkScrapeAll(opts: BulkScrapeOptions = {}): Promise<BulkS
 }
 
 export function abortBulkScrape(): void {
-  if (bulkScrapeActive) {
-    bulkScrapeAborted = true;
+  if (_state.bulkScrapeActive) {
+    _state.bulkScrapeAborted = true;
     log('info', 'bulk.abort_requested');
   }
 }
 
-export function isBulkScrapeActive(): boolean {
-  return bulkScrapeActive;
-}
+export function isBulkScrapeActive(): boolean { return _state.bulkScrapeActive; }
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  URL VALIDATION — verify a single URL resolves to the correct device
@@ -822,7 +823,7 @@ export function clearIndex(): void {
 }
 
 // ── GETTERS for mutable state (primitives can't be live-exported in CJS) ──────
-export function getCrawlInProgress(): boolean { return crawlInProgress; }
+export function getCrawlInProgress(): boolean { return _state.crawlInProgress; }
 export function getLastCrawlStats(): CrawlStats | null { return lastCrawlStats; }
 export function getIndexStore(): Map<string, IndexEntry> { return indexStore; }
 
