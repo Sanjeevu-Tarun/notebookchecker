@@ -64,18 +64,9 @@ app.get('/api/phone', async (req, res) => {
 
     // If we have a good match (at least half the tokens matched), scrape it from index
     if (best && bestScore >= Math.ceil(qTokens.length * 0.5)) {
-      // Check if already scraped and cached
-      if (best.status === 'done') {
-        // Re-scrape to get full data (index only stores metadata, not full scrape)
-        const result = await scrapeIndexedDevice(best.url);
-        if (result.success) {
-          return res.json({ success: true, source: 'index', matchedUrl: best.url, matchScore: bestScore, data: result.data });
-        }
-      }
-      // Not yet scraped — scrape it now
       const result = await scrapeIndexedDevice(best.url);
       if (result.success) {
-        return res.json({ success: true, source: 'index', matchedUrl: best.url, matchScore: bestScore, data: result.data });
+        return res.json({ success: true, source: result.cached ? 'cache' : 'index', cached: result.cached, matchedUrl: best.url, matchScore: bestScore, data: result.data });
       }
     }
 

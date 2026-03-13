@@ -99,6 +99,14 @@ async function rDelForce(keys: string[]): Promise<void> {
     { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } });
 }
 
+async function rSetPermanent(k: string, v: unknown): Promise<void> {
+  const { url, token } = rBase();
+  await _rax.post(`${url}/pipeline`,
+    [['SET', k, JSON.stringify(v)]],
+    { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } },
+  );
+}
+
 async function rSetNX(k: string, v: string, ttl: number): Promise<boolean> {
   try {
     const { url, token } = rBase();
@@ -118,7 +126,7 @@ async function loadEntries(): Promise<Record<string, IndexEntry>> {
 }
 
 async function saveEntries(e: Record<string, IndexEntry>): Promise<void> {
-  await rSet(ENTRIES_KEY, e, ENTRIES_TTL);
+  await rSetPermanent(ENTRIES_KEY, e);
 }
 
 // ── HTTP ──────────────────────────────────────────────────────────────────────
@@ -368,7 +376,22 @@ export async function getEntry(url: string): Promise<IndexEntry | null> {
 //  WRITE FUNCTIONS
 // ══════════════════════════════════════════════════════════════════════════════
 
-export async function scrapeIndexedDevice(url: string): Promise<{ success: boolean; data?: any; error?: string }> {
+// Cache key for full scraped device data — stored separately from index entries
+function scrapeDataKey(url: string): string {
+  // Use a short hash of the URL to keep key size small
+  let h = 0;
+  for (let i = 0; i < url.length; i++) { h = (Math.imul(31, h) + url.charCodeAt(i)) | 0; }
+  return `nbc:scrape:v1:${Math.abs(h)}`;
+}
+
+export async function scrapeIndexedDevice(url: string): Promise<{ success: boolean; data?: any; error?: string; cached?: boolean }> {
+  // Check Redis cache first — if we already scraped this device, return instantly
+  const cacheKey = scrapeDataKey(url);
+  try {
+    const cached = await rGet(cacheKey);
+    if (cached) return { success: true, data: cached, cached: true };
+  } catch { /* cache miss — proceed to scrape */ }
+
   const entries = await loadEntries();
   let entry = entries[url];
   if (!entry) {
@@ -382,10 +405,14 @@ export async function scrapeIndexedDevice(url: string): Promise<{ success: boole
   try {
     const { scrapeNotebookCheckDevice } = await import('./notebookcheck');
     const data = await scrapeNotebookCheckDevice(url, entry.title);
+
+    // Save full scrape data permanently — never expires
+    await rSetPermanent(cacheKey, data);
+
     const fresh = await loadEntries();
     fresh[url] = { ...(fresh[url] || entry), status: 'done', scrapedAt: new Date().toISOString(), errorMsg: undefined };
     await saveEntries(fresh);
-    return { success: true, data };
+    return { success: true, data, cached: false };
   } catch (e: any) {
     const fresh = await loadEntries();
     const ex = fresh[url] || entry;
