@@ -922,7 +922,7 @@ app.get('/migrate', (req, res) => {
 <html>
 <head>
   <meta charset="utf-8">
-  <title>NBC Migration — Upgrade to Review URLs${String.fromCharCode(60)}/title>
+  <title>NBC Migration — Upgrade to Review URLs</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: monospace; background: #0d1117; color: #e6edf3; padding: 24px; }
@@ -948,21 +948,21 @@ app.get('/migrate', (req, res) => {
     #btn:disabled { background: #30363d; color: #8b949e; cursor: not-allowed; }
     #done-banner { display: none; margin-top: 16px; padding: 14px; background: #0d4a23;
                    border: 1px solid #238636; border-radius: 6px; color: #3fb950; font-size: 14px; text-align: center; }
-  <\/style>
-<\/head>
+  </style>
+</head>
 <body>
-  <h1>🔄 NBC Migration — Upgrade Library URLs → Internal Review URLs<\/h1>
-  <div id="status">Press Start to begin. Each batch processes 200 entries.<\/div>
-  <div id="bar-wrap"><div id="bar"><\/div><\/div>
+  <h1>🔄 NBC Migration — Upgrade Library URLs → Internal Review URLs</h1>
+  <div id="status">Press Start to begin. Each batch processes 200 entries.</div>
+  <div id="bar-wrap"><div id="bar"></div></div>
   <div id="stats">
-    <div class="stat"><div class="val" id="v-processed">—<\/div><div class="lbl">Processed<\/div><\/div>
-    <div class="stat" id="upgraded"><div class="val" id="v-upgraded">—<\/div><div class="lbl">Upgraded ✅<\/div><\/div>
-    <div class="stat" id="noReview"><div class="val" id="v-noReview">—<\/div><div class="lbl">No Review Yet<\/div><\/div>
-    <div class="stat" id="errors"><div class="val" id="v-errors">—<\/div><div class="lbl">Errors<\/div><\/div>
-  <\/div>
-  <div id="log"><\/div>
-  <button id="btn" onclick="start()">▶ Start Migration<\/button>
-  <div id="done-banner">✅ Migration complete! Search index rebuilt. All review URLs are now stored.<\/div>
+    <div class="stat"><div class="val" id="v-processed">—</div><div class="lbl">Processed</div></div>
+    <div class="stat" id="upgraded"><div class="val" id="v-upgraded">—</div><div class="lbl">Upgraded ✅</div></div>
+    <div class="stat" id="noReview"><div class="val" id="v-noReview">—</div><div class="lbl">No Review Yet</div></div>
+    <div class="stat" id="errors"><div class="val" id="v-errors">—</div><div class="lbl">Errors</div></div>
+  </div>
+  <div id="log"></div>
+  <button id="btn" onclick="start()">▶ Start Migration</button>
+  <div id="done-banner">✅ Migration complete! Search index rebuilt. All review URLs are now stored.</div>
 
 <script>
   let running = false;
@@ -1032,9 +1032,9 @@ app.get('/migrate', (req, res) => {
       running = false;
     }
   }
-${String.fromCharCode(60)}/script>
-<\/body>
-<\/html>`);
+</script>
+</body>
+</html>`);
 });
 
 // /recover — live UI for recovering deleted review URLs + purging library duplicates
@@ -1044,7 +1044,7 @@ app.get('/recover', (req, res) => {
 <html>
 <head>
   <meta charset="utf-8">
-  <title>NBC Full Re-crawl${String.fromCharCode(60)}/title>
+  <title>NBC Full Re-crawl</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: monospace; background: #0d1117; color: #e6edf3; padding: 24px; }
@@ -1078,31 +1078,31 @@ app.get('/recover', (req, res) => {
     button:disabled { background: #30363d !important; color: #8b949e; cursor: not-allowed; }
     #done-banner { display: none; margin-top: 14px; padding: 12px; background: #0d2942;
                    border: 1px solid #1f6feb; border-radius: 6px; color: #58a6ff; text-align: center; }
-  <\/style>
-<\/head>
+  </style>
+</head>
 <body>
-  <h1>🔄 NBC Full Re-crawl Dashboard<\/h1>
-  <p class="subtitle">Source A: NBC Smartphone Reviews (~80 pages, internal reviews) &nbsp;|&nbsp; Source B: Chronological (~150 pages, library fallback)<\/p>
-  <div id="status">Choose an action below.<\/div>
-  <div id="bar-wrap"><div id="bar" class="reviews"><\/div><\/div>
+  <h1>🔄 NBC Full Re-crawl Dashboard</h1>
+  <p class="subtitle">Source A: NBC Smartphone Reviews (~80 pages, internal reviews) &nbsp;|&nbsp; Source B: Chronological (~150 pages, library fallback)</p>
+  <div id="status">Choose an action below.</div>
+  <div id="bar-wrap"><div id="bar" class="reviews"></div></div>
 
   <div id="stats">
-    <div class="stat"><div class="val blue"  id="v-page">—<\/div><div class="lbl">Current Page<\/div><\/div>
-    <div class="stat"><div class="val green" id="v-total">—<\/div><div class="lbl">Total in Index<\/div><\/div>
-    <div class="stat"><div class="val green" id="v-new">—<\/div><div class="lbl">Added This Run<\/div><\/div>
-    <div class="stat"><div class="val yellow"id="v-found">—<\/div><div class="lbl">Found Per Page<\/div><\/div>
-    <div class="stat"><div class="val red"   id="v-purged">—<\/div><div class="lbl">Dupes Purged<\/div><\/div>
-  <\/div>
+    <div class="stat"><div class="val blue"  id="v-page">—</div><div class="lbl">Current Page</div></div>
+    <div class="stat"><div class="val green" id="v-total">—</div><div class="lbl">Total in Index</div></div>
+    <div class="stat"><div class="val green" id="v-new">—</div><div class="lbl">Added This Run</div></div>
+    <div class="stat"><div class="val yellow"id="v-found">—</div><div class="lbl">Found Per Page</div></div>
+    <div class="stat"><div class="val red"   id="v-purged">—</div><div class="lbl">Dupes Purged</div></div>
+  </div>
 
-  <div id="log"><\/div>
+  <div id="log"></div>
 
   <div class="buttons">
-    <button id="btn-all"   onclick="runAll()">🚀 Full Re-crawl (A + B + Purge)<\/button>
-    <button id="btn-rev"   onclick="runSource('reviews')">🟢 Source A Only (Reviews)<\/button>
-    <button id="btn-lib"   onclick="runSource('chrono')">🔵 Source B Only (Library)<\/button>
-    <button id="btn-purge" onclick="runPurge()">🗑 Purge Dupes Only<\/button>
-  <\/div>
-  <div id="done-banner" id="done-banner">✅ Done! Index rebuilt and clean.<\/div>
+    <button id="btn-all"   onclick="runAll()">🚀 Full Re-crawl (A + B + Purge)</button>
+    <button id="btn-rev"   onclick="runSource('reviews')">🟢 Source A Only (Reviews)</button>
+    <button id="btn-lib"   onclick="runSource('chrono')">🔵 Source B Only (Library)</button>
+    <button id="btn-purge" onclick="runPurge()">🗑 Purge Dupes Only</button>
+  </div>
+  <div id="done-banner" id="done-banner">✅ Done! Index rebuilt and clean.</div>
 
 <script>
   let running = false;
@@ -1139,22 +1139,22 @@ app.get('/recover', (req, res) => {
       document.getElementById('v-new').textContent   = totalNew;
       document.getElementById('v-found').textContent = res.phonesFound;
       setBar((page / estPages) * 100, phaseClass);
-      log('<span class="phase ' + phaseClass + '">' + label + '<\/span> p' + res.page +
+      log('<span class="phase ' + phaseClass + '">' + label + '</span> p' + res.page +
           ' — ' + res.phonesFound + ' phones, ' + res.newUrls + ' new (total: ' + res.totalUrls + ')',
           res.newUrls > 0 ? 'lok' : 'll');
       if (res.done) break;
       page = res.nextPage;
       await new Promise(r => setTimeout(r, 700));
     }
-    log('<span class="phase ' + phaseClass + '">' + label + '<\/span> ✅ Complete — ' + totalNew + ' entries added.', 'lok');
+    log('<span class="phase ' + phaseClass + '">' + label + '</span> ✅ Complete — ' + totalNew + ' entries added.', 'lok');
   }
 
   async function runPurge() {
-    log('<span class="phase pp">PURGE<\/span> Purging library duplicates and junk titles…');
+    log('<span class="phase pp">PURGE</span> Purging library duplicates and junk titles…');
     const pr = await fetch('/api/index/purge-library-duplicates').then(r => r.json());
     if (!pr.success) throw new Error(pr.error);
     document.getElementById('v-purged').textContent = pr.purged;
-    log('<span class="phase pp">PURGE<\/span> 🗑 Purged ' + pr.purged +
+    log('<span class="phase pp">PURGE</span> 🗑 Purged ' + pr.purged +
         ' (' + pr.reasons.libraryDuplicate + ' lib dupes, ' + pr.reasons.junkTitle + ' junk). ' +
         pr.kept + ' clean entries remain.', 'lok');
     return pr;
@@ -1181,18 +1181,18 @@ app.get('/recover', (req, res) => {
     if (running) return;
     running = true; setBtns(true);
     document.getElementById('done-banner').style.display = 'none';
-    log('<span class="phase pd">CLEAR<\/span> Clearing existing index…');
+    log('<span class="phase pd">CLEAR</span> Clearing existing index…');
     try {
       // Clear index first
       const cl = await fetch('/api/index/clear?confirm=yes').then(r => r.json());
-      log('<span class="phase pd">CLEAR<\/span> Index cleared. Starting fresh.', 'lwarn');
+      log('<span class="phase pd">CLEAR</span> Index cleared. Starting fresh.', 'lwarn');
 
       // Phase 1: Reviews
-      log('<span class="phase pa">SOURCE A<\/span> Crawling NBC Smartphone Reviews (~80 pages)…');
+      log('<span class="phase pa">SOURCE A</span> Crawling NBC Smartphone Reviews (~80 pages)…');
       await crawlAllPages('/api/index/crawl-reviews-page', 'SOURCE A', 'pa', 80);
 
       // Phase 2: Library
-      log('<span class="phase pb">SOURCE B<\/span> Crawling Chronological library (~150 pages, skipping duplicates)…');
+      log('<span class="phase pb">SOURCE B</span> Crawling Chronological library (~150 pages, skipping duplicates)…');
       await crawlAllPages('/api/index/crawl-chrono-page', 'SOURCE B', 'pb', 150);
 
       // Phase 3: Purge any remaining dupes
@@ -1200,7 +1200,7 @@ app.get('/recover', (req, res) => {
       await runPurge();
 
       setStatus('✅ Done — index fully rebuilt');
-      log('<span class="phase pa">DONE<\/span> 🎉 Full re-crawl complete. Index is clean.', 'ldone');
+      log('<span class="phase pa">DONE</span> 🎉 Full re-crawl complete. Index is clean.', 'ldone');
       document.getElementById('done-banner').style.display = 'block';
     } catch(e) {
       log('❌ ' + e.message, 'lerr');
@@ -1208,9 +1208,9 @@ app.get('/recover', (req, res) => {
     }
     setBtns(false); running = false;
   }
-${String.fromCharCode(60)}/script>
-<\/body>
-<\/html>\`);
+</script>
+</body>
+</html>\`);
 });
 
 // /api/index/brands — brand coverage
@@ -1364,7 +1364,7 @@ app.get('/crawler', (_, res) => {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>NBC Crawler${String.fromCharCode(60)}/title>
+<title>NBC Crawler</title>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Syne:wght@700;800&display=swap');
   :root{--bg:#0a0a0f;--surface:#12121a;--border:#1e1e2e;--accent:#00ff87;--accent2:#0ff;--danger:#ff4d6d;--warn:#ffd166;--text:#e0e0f0;--muted:#555570}
@@ -1397,34 +1397,34 @@ app.get('/crawler', (_, res) => {
   .pulse{display:inline-block;width:8px;height:8px;background:var(--accent);border-radius:50%;animation:pulse 1.2s ease-in-out infinite}
   @keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.4;transform:scale(.7)}}
   #statusBadge{font-size:.75rem;color:var(--muted)}
-<\/style>
-<\/head>
+</style>
+</head>
 <body>
-<h1>NBC Crawler<\/h1>
-<p class="subtitle">NotebookCheck Auto-Crawler — one page at a time, Vercel-safe<\/p>
+<h1>NBC Crawler</h1>
+<p class="subtitle">NotebookCheck Auto-Crawler — one page at a time, Vercel-safe</p>
 <div class="controls">
-  <button class="btn btn-unlock" onclick="unlock()">🔓 Unlock<\/button>
-  <button class="btn btn-start" id="btnStart" onclick="startCrawl()">▶ Start Crawling<\/button>
-  <button class="btn btn-stop" id="btnStop" onclick="stopCrawl()" style="display:none">■ Stop<\/button>
-  <span id="statusBadge">Idle<\/span>
-  <span id="logIndicator"><\/span>
-<\/div>
+  <button class="btn btn-unlock" onclick="unlock()">🔓 Unlock</button>
+  <button class="btn btn-start" id="btnStart" onclick="startCrawl()">▶ Start Crawling</button>
+  <button class="btn btn-stop" id="btnStop" onclick="stopCrawl()" style="display:none">■ Stop</button>
+  <span id="statusBadge">Idle</span>
+  <span id="logIndicator"></span>
+</div>
 <div class="stats-grid">
-  <div class="stat-card" id="cardPages"><div class="stat-label">Pages Crawled<\/div><div class="stat-value muted" id="statPages">0<\/div><\/div>
-  <div class="stat-card"><div class="stat-label">Total URLs<\/div><div class="stat-value muted" id="statUrls">0<\/div><\/div>
-  <div class="stat-card"><div class="stat-label">New This Run<\/div><div class="stat-value muted" id="statNew">0<\/div><\/div>
-  <div class="stat-card"><div class="stat-label">Current Page<\/div><div class="stat-value muted" id="statPage">—<\/div><\/div>
-  <div class="stat-card"><div class="stat-label">Errors<\/div><div class="stat-value muted" id="statErrors">0<\/div><\/div>
-  <div class="stat-card"><div class="stat-label">Elapsed<\/div><div class="stat-value muted" id="statElapsed">0s<\/div><\/div>
-<\/div>
+  <div class="stat-card" id="cardPages"><div class="stat-label">Pages Crawled</div><div class="stat-value muted" id="statPages">0</div></div>
+  <div class="stat-card"><div class="stat-label">Total URLs</div><div class="stat-value muted" id="statUrls">0</div></div>
+  <div class="stat-card"><div class="stat-label">New This Run</div><div class="stat-value muted" id="statNew">0</div></div>
+  <div class="stat-card"><div class="stat-label">Current Page</div><div class="stat-value muted" id="statPage">—</div></div>
+  <div class="stat-card"><div class="stat-label">Errors</div><div class="stat-value muted" id="statErrors">0</div></div>
+  <div class="stat-card"><div class="stat-label">Elapsed</div><div class="stat-value muted" id="statElapsed">0s</div></div>
+</div>
 <div class="progress-bar-wrap">
-  <div class="progress-info"><span id="progressLabel">Ready to crawl<\/span><span id="progressPct">0%<\/span><\/div>
-  <div class="progress-track"><div class="progress-fill" id="progressFill"><\/div><\/div>
-<\/div>
+  <div class="progress-info"><span id="progressLabel">Ready to crawl</span><span id="progressPct">0%</span></div>
+  <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
+</div>
 <div class="log-wrap">
-  <div class="log-header"><span>Activity Log<\/span><span id="logIndicator2"><\/span><\/div>
-  <div class="log-body" id="logBody"><\/div>
-<\/div>
+  <div class="log-header"><span>Activity Log</span><span id="logIndicator2"></span></div>
+  <div class="log-body" id="logBody"></div>
+</div>
 <script>
   let running=false,currentPage=1,totalPages=0,totalUrls=0,totalNew=0,errors=0,startTime=null,elapsedTimer=null,stopRequested=false;
   const base='';// same origin — no CORS issues
@@ -1434,9 +1434,9 @@ app.get('/crawler', (_, res) => {
   async function unlock(){log('Unlocking...','warn');try{const r=await fetch('/api/debug/redis-force-unlock'),d=await r.json();log(d.hint?.includes('✅')?'✅ Lock cleared':'Lock: '+JSON.stringify(d),d.hint?.includes('✅')?'ok':'warn')}catch(e){log('Unlock failed: '+e.message,'err')}}
   async function startCrawl(){if(running)return;running=true;stopRequested=false;startTime=Date.now();currentPage=1;document.getElementById('btnStart').disabled=true;document.getElementById('btnStop').style.display='inline-block';setStatus('Crawling...',true);elapsedTimer=setInterval(()=>{const s=Math.round((Date.now()-startTime)/1000);document.getElementById('statElapsed').textContent=s+'s';document.getElementById('statElapsed').className='stat-value'},1000);try{await fetch('/api/debug/redis-force-unlock');log('🔓 Lock cleared','ok')}catch{}log('Starting crawl...','info');while(!stopRequested){try{document.getElementById('cardPages').classList.add('active');const resp=await fetch(\`/api/index/crawl-page?page=\${currentPage}\`);if(!resp.ok){log(\`Page \${currentPage} HTTP \${resp.status}\`,'err');errors++;updateStats();await new Promise(r=>setTimeout(r,2000));currentPage++;continue}const data=await resp.json();if(!data.success){log(\`Page \${currentPage}: \${data.error||'error'}\`,'err');errors++;updateStats();await new Promise(r=>setTimeout(r,2000));currentPage++;continue}const result=data.result;totalPages++;totalUrls=result.totalUrls;totalNew+=result.newUrls;updateStats();const pct=Math.min(Math.round(currentPage/150*100),99);document.getElementById('progressFill').style.width=pct+'%';document.getElementById('progressPct').textContent=pct+'%';document.getElementById('progressLabel').textContent=\`Page \${currentPage} crawled\`;log(\`Page \${currentPage} → \${result.phonesFound} phones, \${result.newUrls} new (total: \${result.totalUrls})\`,result.newUrls>0?'ok':'info');if(result.done){log(\`🎉 Done! \${totalUrls} URLs indexed across \${totalPages} pages.\`,'done');document.getElementById('progressFill').style.width='100%';document.getElementById('progressPct').textContent='100%';document.getElementById('progressLabel').textContent='Crawl complete!';break}currentPage++;await new Promise(r=>setTimeout(r,800))}catch(e){log(\`Page \${currentPage} failed: \${e.message}\`,'err');errors++;updateStats();await new Promise(r=>setTimeout(r,3000));currentPage++}}if(stopRequested)log(\`⏹ Stopped at page \${currentPage}. \${totalUrls} URLs so far.\`,'warn');running=false;clearInterval(elapsedTimer);document.getElementById('btnStart').disabled=false;document.getElementById('btnStart').textContent='▶ Resume';document.getElementById('btnStop').style.display='none';document.getElementById('cardPages').classList.remove('active');setStatus('Done',false)}
   function stopCrawl(){stopRequested=true;setStatus('Stopping...',false);log('Stop requested...','warn')}
-${String.fromCharCode(60)}/script>
-<\/body>
-<\/html>`);
+</script>
+</body>
+</html>`);
 });
 
 // /api/index/rebuild-search — rebuild the fast search index from entries
