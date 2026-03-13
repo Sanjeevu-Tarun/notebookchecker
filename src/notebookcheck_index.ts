@@ -192,9 +192,10 @@ export function extractPhoneUrls(html: string): Array<{ url: string; title: stri
   const out: Array<{ url: string; title: string }> = [];
   const seen = new Set<string>();
 
-  // On the Chronological page, each row has a device-type label (e.g. "Smartphone",
-  // "Notebook", "Tablet") visible as text near the link. We use that as the primary
-  // signal, falling back to slug-based heuristics for other listing pages.
+  // The Chronological page (Chronological-sorting.2690.0.html) renders each entry as:
+  //   <a href="/Samsung-Galaxy-S26-Ultra.1244015.0.html">Samsung Galaxy S26 Ultra</a> (Smartphone)
+  // The "(Smartphone)" label is a text node inside the same parent element as the <a>.
+  // We check the parent element's full text — this is the ground truth type signal.
   $('a[href]').each((_, el) => {
     let href = $(el).attr('href') || '';
     if (href.startsWith('/')) href = 'https://www.notebookcheck.net' + href;
@@ -205,26 +206,14 @@ export function extractPhoneUrls(html: string): Array<{ url: string; title: stri
     if (!/\.\d{4,}\.0\.html$/.test(href)) return;
 
     const slug = href.split('/').pop() || '';
-    // Skip known listing/navigation pages
-    if (/^(Reviews|Smartphones|Search|Topics|RSS|index|Notebooks|News|Smartphone|Library|Comparison|Chronological)\./.test(slug)) return;
+    // Skip listing/navigation pages
+    if (/^(Reviews|Smartphones|Search|Topics|RSS|index|Notebooks|News|Smartphone|Library|Comparison|Chronological)\./i.test(slug)) return;
     if (/-Series\./i.test(slug)) return;
 
-    // ── PRIMARY FILTER: Smartphone label on Chronological page ───────────────
-    // The chronological table has a "Type" column / cell near each row.
-    // Walk up to the row (<tr>) and check if "Smartphone" appears in it.
-    // This is the cleanest signal — if it says Smartphone, keep it; otherwise
-    // fall through to slug-based heuristics so the function still works on
-    // other listing pages (Smartphones.155, Library.279, etc.).
-    const $row = $(el).closest('tr');
-    if ($row.length) {
-      const rowText = $row.text();
-      if (!/smartphone/i.test(rowText)) return; // chronological page: strict type match
-    }
-
-    // ── SECONDARY FILTER: slug-based heuristics (non-table listing pages) ────
-    const tabletSlug = /[-_]pad[-_.0]|[-_]tab[-_.0]|ipad|galaxy[-_]tab|matepad|mediapad|magicpad|lenovo[-_]tab|honor[-_]pad|xiaomi[-_]pad|realme[-_]pad|oppo[-_]pad|oneplus[-_]pad|iqoo[-_]pad|tcl[-_]tab|nokia[-_]tab/i.test(slug);
-    const notAPhone = tabletSlug || /headphone|earphone|microphone|vacuum|robot|calendar|smartwatch|tablet|laptop|notebook|macbook|chromebook|charger|powerbank|earbuds|speaker|monitor|drone|keyboard|mouse|printer|router|modem|television|projector|cpu[-_]analysis|gpu[-_]analysis|thinkpad|ideapad|vivobook|zenbook|matebook|xps-|inspiron|pavilion|envy|spectre|elitebook|probook|razer-blade|apple-m[0-9][-_]/i.test(slug);
-    if (notAPhone) return;
+    // Check parent element text for "(Smartphone)" label — set by notebookcheck on every entry.
+    // This is the only filter needed: Tablets show "(Tablet)", laptops show "(Notebook)" etc.
+    const parentText = $(el).parent().text();
+    if (!/\(Smartphone\)/i.test(parentText)) return;
 
     if (seen.has(href.toLowerCase())) return;
     seen.add(href.toLowerCase());
