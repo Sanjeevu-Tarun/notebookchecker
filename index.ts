@@ -35,7 +35,7 @@ import {
 const app = express();
 app.use(cors());
 
-app.get('/api/health', (_, res) => res.json({ status: 'ok' }));
+app.get('/api/health', (_, res) => res.json({ status: 'ok', version: 'FIX-v4-1773391480' }));
 
 // ─────────────────────────────────────────────────────────────────────────────
 // /api/phone — NotebookCheck ONLY (fast version, no GSMArena)
@@ -919,5 +919,38 @@ app.get('/api/debug/redis-force-unlock', async (req, res) => {
     });
   } catch (e: any) {
     return res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// /api/debug/crawl-direct — bypass all lock logic, crawl page 1 directly
+app.get('/api/debug/crawl-direct', async (req, res) => {
+  try {
+    // Step 1: force delete lock directly via Redis REST
+    const axios2 = (await import('axios')).default;
+    const url   = process.env.UPSTASH_REDIS_REST_URL!;
+    const token = process.env.UPSTASH_REDIS_REST_TOKEN!;
+    const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+    await axios2.post(`${url}/pipeline`, [
+      ['DEL', 'nbc:index:v3:crawl_lock'],
+      ['DEL', 'nbc:index:v3:crawl_progress'],
+    ], { headers });
+
+    // Step 2: verify lock gone
+    const check = await axios2.get(`${url}/get/nbc:index:v3:crawl_lock`, { headers });
+    const lockVal = check.data?.result;
+
+    // Step 3: crawl one page directly
+    const result = await crawlOnePage(1);
+
+    return res.json({
+      success: true,
+      version: 'FIX-v4-CRAWLFIX',
+      lockDeletedSuccessfully: lockVal === null,
+      lockValueAfterDelete: lockVal,
+      crawlResult: result,
+    });
+  } catch (e: any) {
+    return res.status(500).json({ success: false, error: e.message, stack: e.stack?.slice(0, 500) });
   }
 });
