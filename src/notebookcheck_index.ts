@@ -393,19 +393,39 @@ export async function rebuildSearchIndex(): Promise<void> {
   await rSetPermanent(SEARCH_INDEX_KEY, flat);
 }
 
-export async function searchIndex(q: string): Promise<{ url: string; title: string } | null> {
-  // Use the same normalizer as SearXNG so "oneplus 15" → "OnePlus 15", aliases resolve, etc.
-  const { normalizeQuery } = await import('./notebookcheck');
-  const normalized = normalizeQuery(q).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-  const original   = q.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+// Same scoring as GSMArena resolver — all words must match, variant penalty system
+function scoreIndexMatch(entryTitle: string, query: string): number {
+  const d = entryTitle.toLowerCase();
+  const q = query.toLowerCase().trim();
+  const qWords = q.split(/\s+/).filter((w: string) => w.length > 1);
 
-  // Build token set: use normalized query tokens, fall back to original
-  const makeTokens = (s: string) => s.split(' ').filter((t: string) => t.length >= 2);
-  const normTokens = makeTokens(normalized);
-  const origTokens = makeTokens(original);
-  // Prefer normalized tokens but keep originals too for recall
-  const allTokens = [...new Set([...normTokens, ...origTokens])];
-  if (!allTokens.length) return null;
+  // ALL query words must appear in the title — hard reject otherwise
+  if (!qWords.every((w: string) => d.includes(w))) return -1;
+
+  // Exact or substring match
+  if (d === q) return 10000;
+  if (d.includes(q)) return 8000;
+
+  // Penalise entries that have variant words the query didn't ask for
+  // e.g. query="s25 ultra" → "S25 Edge" gets -2000 for "edge" not in query
+  // e.g. query="s25 ultra" → "S25 Ultra review" scores clean
+  const variants = ['ultra', 'pro', 'plus', 'mini', 'lite', 'fe', 'max', 'edge', 'standard', 'turbo', 'fold', 'flip'];
+  const lastQWord = qWords[qWords.length - 1];
+  let penalty = 0;
+  for (const v of variants) {
+    if (v !== lastQWord && d.includes(' ' + v) && !q.includes(v)) penalty += 2000;
+  }
+
+  // Bonus for shorter title (fewer extra words = more precise match)
+  const lengthBonus = Math.max(0, 500 - entryTitle.length * 5);
+
+  return 5000 - penalty + lengthBonus;
+}
+
+export async function searchIndex(q: string): Promise<{ url: string; title: string } | null> {
+  // Normalize query the same way SearXNG does (alias resolution, brand expansion, etc.)
+  const { normalizeQuery } = await import('./notebookcheck');
+  const normalized = normalizeQuery(q).toLowerCase().trim();
 
   // Load compact search index from Redis
   let flat: Array<{ url: string; title: string; slug: string }> = [];
@@ -417,32 +437,18 @@ export async function searchIndex(q: string): Promise<{ url: string; title: stri
   }
   if (!flat?.length) return null;
 
-  // Brand tokens to skip when requiring core model matches
-  const BRAND_TOKENS = new Set(['samsung','apple','google','oneplus','oppo','vivo','motorola','sony','asus','realme','honor','huawei','nothing','poco','redmi','xiaomi','galaxy','iphone','pixel']);
-  const coreTokens = normTokens.filter(t => !BRAND_TOKENS.has(t) && t.length >= 2);
-
   let best: { url: string; title: string } | null = null;
-  let bestScore = 0;
+  let bestScore = -1;
 
   for (const entry of flat) {
-    const haystack = (entry.title + ' ' + entry.slug).toLowerCase().replace(/[^a-z0-9]+/g, ' ');
-
-    // All core (non-brand) tokens MUST match — avoids matching wrong model entirely
-    const coreMatched = coreTokens.every(t => haystack.includes(t));
-    if (coreTokens.length > 0 && !coreMatched) continue;
-
-    const matched = allTokens.filter(t => haystack.includes(t)).length;
-    let score = matched;
-    // Prefer shorter titles (more specific match) when all tokens present
-    if (matched === normTokens.length) score += 10 - Math.min(10, entry.title.length / 50);
-
+    const score = scoreIndexMatch(entry.title, normalized);
     if (score > bestScore) {
       bestScore = score;
       best = { url: entry.url, title: entry.title };
     }
   }
 
-  return best;
+  return bestScore > 0 ? best : null;
 }
 
 // Cache key for full scraped device data — stored separately from index entries
@@ -451,6 +457,10 @@ function scrapeDataKey(url: string): string {
   let h = 0;
   for (let i = 0; i < url.length; i++) { h = (Math.imul(31, h) + url.charCodeAt(i)) | 0; }
   return `nbc:scrape:v1:${Math.abs(h)}`;
+}
+
+export async function clearScrapeCache(url: string): Promise<void> {
+  await rDel(scrapeDataKey(url));
 }
 
 export async function scrapeIndexedDevice(url: string): Promise<{ success: boolean; data?: any; error?: string; cached?: boolean }> {

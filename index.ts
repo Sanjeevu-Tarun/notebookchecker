@@ -45,20 +45,19 @@ app.get('/api/health', (_, res) => res.json({ status: 'ok', version: 'FIX-v4-177
 // ─────────────────────────────────────────────────────────────────────────────
 app.get('/api/phone', async (req, res) => {
   const q = req.query.q as string;
+  const nocache = req.query.nocache === '1';
   if (!q) return res.status(400).json({ success: false, error: '"q" required' });
 
   try {
-    const { scrapeIndexedDevice, searchIndex } = await import('./src/notebookcheck_index');
+    const { scrapeIndexedDevice, searchIndex, clearScrapeCache } = await import('./src/notebookcheck_index');
 
-    // Step 1: Check scrape cache first — if already scraped, return in ~100ms
-    // Step 2: Search index for matching URL, scrape it (~3-4s, skips SearXNG)
-    // Step 3: Fall back to SearXNG live search if not in index
     const best = await searchIndex(q);
 
     if (best) {
+      if (nocache) await clearScrapeCache(best.url).catch(() => {});
       const result = await scrapeIndexedDevice(best.url);
       if (result.success) {
-        return res.json({ success: true, source: result.cached ? 'cache' : 'index', cached: result.cached, matchedUrl: best.url, data: result.data });
+        return res.json({ success: true, source: result.cached ? 'cache' : 'index', cached: result.cached, matchedUrl: best.url, matchedTitle: best.title, data: result.data });
       }
     }
 
