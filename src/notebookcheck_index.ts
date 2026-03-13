@@ -216,32 +216,35 @@ function extractReviewUrls(html: string): Array<{ url: string; title: string }> 
       return;
     }
 
-    // Must be a notebookcheck review URL (has 4+ digit article ID)
+    // Strip query params — NBC review URLs never need them
+    href = href.split('?')[0];
+
+    // Must be a notebookcheck review URL with 4+ digit article ID: .1234567.0.html
     if (!href.includes('notebookcheck.net')) return;
-    if (!/\.\d{4,}\.0\.html/.test(href)) return;
+    if (!/.\d{4,}\.0\.html$/.test(href)) return;
 
-    // Reject query-param URLs, listing/search pages
-    if (/[?&](tag|q|word|id|cat|page)=/.test(href)) return;
-    if (/\/(Topics|Search|Smartphones|RSS|Reviews|index)\.\d/i.test(href)) return;
-
-    // Reject non-review pages (news, comparisons, etc.)
+    // Reject listing/search/category pages by their known slug prefixes
     const slug = href.split('/').pop() || '';
-    if (/users?[-_]complain|rumou?r|leaked|announced|unveiled|price[-_]drop|hands?[-_]on(?!.*review)|first[-_]look|unboxing|teardown|vs[-_]|comparison|external[-_]review/i.test(slug)) return;
+    if (/^(Reviews|Smartphones|Search|Topics|RSS|index|Notebooks)\./i.test(slug)) return;
 
-    // Must contain "review" or "smartphone" in URL slug
+    // Reject clearly non-review content
+    if (/users?[-_]complain|rumou?r|leaked?|price[-_]drop|hands?[-_]on(?!.*review)|first[-_]look|unboxing|teardown|external[-_]review/i.test(slug)) return;
+
+    // Must contain review OR smartphone OR phone in the slug
+    // NBC slugs: "Samsung-Galaxy-S25-Ultra-smartphone-review.1234567.0.html"
+    //            "Google-Pixel-10-Pro-XL-Powerful-smartphone-with-weak-heart.1128379.0.html"
     if (!/review|smartphone|phone/i.test(slug)) return;
 
-    const key = href.split('?')[0].toLowerCase();
+    const key = href.toLowerCase();
     if (seen.has(key)) return;
     seen.add(key);
 
     const rawTitle = $(el).attr('title') || $(el).text().trim() || '';
     const title = rawTitle.replace(/\s+/g, ' ').trim().slice(0, 200);
 
-    // Must have a non-trivial title (not just an icon/image link)
     if (title.length < 5) return;
 
-    results.push({ url: href.split('?')[0], title });
+    results.push({ url: href, title });
   });
 
   return results;
@@ -331,8 +334,13 @@ async function saveIndexToRedis(): Promise<void> {
 //  doesn't reset "done" entries.
 // ══════════════════════════════════════════════════════════════════════════════
 
-// NBC Reviews base URL with smartphone filter
-const NBC_REVIEWS_BASE = 'https://www.notebookcheck.net/Reviews.55.0.html';
+// NBC Reviews listing — two known URL formats for the smartphone filter:
+//   Format A: https://www.notebookcheck.net/Reviews.55.0.html?cat=Smartphones&page=N
+//   Format B: https://www.notebookcheck.net/Smartphones.1311.0.html  (direct category page)
+// We try Format A first; if it returns 0 results we fall back to Format B.
+const NBC_REVIEWS_BASE_A = 'https://www.notebookcheck.net/Reviews.55.0.html';
+const NBC_REVIEWS_BASE_B = 'https://www.notebookcheck.net/Smartphones.1311.0.html';
+const NBC_REVIEWS_BASE   = NBC_REVIEWS_BASE_A; // default, overridden in crawl if needed
 
 export interface CrawlOptions {
   maxPages?:       number;   // cap at N pages (default: unlimited)
@@ -369,17 +377,26 @@ export async function crawlNBCSmartphoneIndex(opts: CrawlOptions = {}): Promise<
 
   try {
     // ── STEP 1: Fetch page 1 to determine total page count ──────────────────
-    const firstPageUrl = `${NBC_REVIEWS_BASE}?cat=Smartphones`;
+    // Try Format A (?cat=Smartphones), fall back to Format B (direct category page)
+    let firstPageUrl = `${NBC_REVIEWS_BASE_A}?cat=Smartphones`;
+    let useBaseB = false;
     log('info', 'index.fetch_page', { page: 1, url: firstPageUrl });
 
-    const firstHtml = await fetchPage(firstPageUrl);
+    let firstHtml = await fetchPage(firstPageUrl);
+    let page1Entries = extractReviewUrls(firstHtml);
+
+    // If Format A returned nothing, try Format B (direct category page)
+    if (page1Entries.length === 0) {
+      log('info', 'index.try_format_b', { reason: 'Format A returned 0 results' });
+      firstPageUrl = NBC_REVIEWS_BASE_B;
+      useBaseB = true;
+      firstHtml = await fetchPage(firstPageUrl);
+      page1Entries = extractReviewUrls(firstHtml);
+    }
+
     const maxPageCount = Math.min(detectTotalPages(firstHtml), maxPages);
-    const pagesToFetch = Math.max(maxPageCount, 1); // at least page 1
-
-    log('info', 'index.total_pages', { pagesToFetch });
-
-    // Process page 1
-    const page1Entries = extractReviewUrls(firstHtml);
+    const pagesToFetch = Math.max(maxPageCount, 1);
+    log('info', 'index.total_pages', { pagesToFetch, format: useBaseB ? 'B' : 'A', page1Count: page1Entries.length });
     for (const { url, title } of page1Entries) {
       const isNew = !indexStore.has(url);
       if (isNew || forceRecrawl) {
@@ -404,7 +421,7 @@ export async function crawlNBCSmartphoneIndex(opts: CrawlOptions = {}): Promise<
     for (let page = 2; page <= pagesToFetch; page++) {
       await new Promise(r => setTimeout(r, delayMs));
 
-      const pageUrl = `${NBC_REVIEWS_BASE}?cat=Smartphones&page=${page}`;
+      const pageUrl = useBaseB ? `${NBC_REVIEWS_BASE_B}?page=${page}` : `${NBC_REVIEWS_BASE_A}?cat=Smartphones&page=${page}`;
       log('info', 'index.fetch_page', { page, url: pageUrl });
 
       try {
@@ -805,4 +822,10 @@ export function clearIndex(): void {
   lastCrawlStats = null;
 }
 
-export { lastCrawlStats, crawlInProgress, indexStore };
+// ── GETTERS for mutable state (primitives can't be live-exported in CJS) ──────
+export function getCrawlInProgress(): boolean { return crawlInProgress; }
+export function getLastCrawlStats(): CrawlStats | null { return lastCrawlStats; }
+export function getIndexStore(): Map<string, IndexEntry> { return indexStore; }
+
+// Keep these exports for backwards compat (object reference is stable)
+export { indexStore };

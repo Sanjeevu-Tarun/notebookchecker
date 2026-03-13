@@ -27,7 +27,8 @@ import {
   resetEntry,
   clearIndex,
   loadIndexFromRedis,
-  lastCrawlStats,
+  getCrawlInProgress,
+  getLastCrawlStats,
   indexStore,
 } from './src/notebookcheck_index';
 
@@ -279,21 +280,29 @@ app.get('/api/nbc/device', async (req, res) => {
 app.get('/', (_, res) => res.json({
   status: 'ok',
   endpoints: {
-    // Phone / Device
+    // Phone / Device (SearXNG-based)
     phone:            '/api/phone?q=<device>',
     phoneDebug:       '/api/phone/debug?q=<device>',
-    phoneRace:        '/api/phone/race?q=<device>',
     nbcDevice:        '/api/nbc/device?url=<notebookcheck-url>',
     nbcSuggestions:   '/api/nbc/suggestions?q=<device>',
     nbcDebug:         '/api/nbc/debug?q=<device>',
-    nbcSearxngDebug:  '/api/nbc/searxng-debug?q=<device>',
-    nbcRace:          '/api/nbc/race?q=<device>',
+    // Index-based scraping (no SearXNG — bulk memory approach)
+    indexCrawlDebug:  '/api/index/crawl-debug               ← START HERE: verify NBC is reachable',
+    indexCrawl:       '/api/index/crawl?maxPages=3           ← then crawl 3 pages to test',
+    indexStatus:      '/api/index/status                     ← check crawl progress + coverage',
+    indexValidate:    '/api/index/validate?count=10          ← verify URLs are correct device pages',
+    indexList:        '/api/index/list?status=pending&limit=20',
+    indexScrapeOne:   '/api/index/scrape-one?url=<url>       ← scrape single device (no SearXNG)',
+    indexBulkStart:   '/api/index/bulk-start?concurrency=2   ← scrape everything',
+    indexBulkAbort:   '/api/index/bulk-abort',
+    indexErrors:      '/api/index/errors',
+    indexResetErrors: '/api/index/reset-errors',
+    indexBrands:      '/api/index/brands',
+    indexReload:      '/api/index/reload                     ← restore from Redis after redeploy',
     // Processor / SoC
     processor:            '/api/processor?q=<chip>',
     processorSuggestions: '/api/processor/suggestions?q=<chip>',
     processorDevice:      '/api/processor/device?url=<notebookcheck-url>',
-    processorDebug:       '/api/processor/debug?q=<chip>',
-    processorSearch:      '/api/processor/search?q=<chip>',
   }
 }));
 
@@ -329,6 +338,14 @@ async function pingSearXNG() {
 // Start pinging immediately on boot, then every 10 minutes
 pingSearXNG();
 setInterval(pingSearXNG, PING_INTERVAL_MS);
+
+// Auto-load the NBC review index from Redis on startup (non-blocking)
+// This restores index state after a redeploy so you don't lose scrape progress
+setTimeout(() => {
+  loadIndexFromRedis().then(count => {
+    if (count > 0) console.log(`[index] Loaded ${count} entries from Redis on startup`);
+  }).catch(e => console.warn('[index] Redis load failed on startup:', e.message));
+}, 2000);
 
 // Warm processor search cache on boot — runs in background, staggered 600ms/chip.
 // This pre-populates Redis so the first real user request for popular chips
@@ -633,8 +650,8 @@ app.get('/api/index/crawl', async (req, res) => {
     return;
   }
   try {
-    const stats = await crawlNBCSmartphoneIndex({ maxPages, forceRecrawl: force, delayMs });
-    return res.json({ success: true, crawl: stats, queue: getQueueStats() });
+    const crawlStats = await crawlNBCSmartphoneIndex({ maxPages, forceRecrawl: force, delayMs });
+    return res.json({ success: true, crawl: crawlStats, queue: getQueueStats() });
   } catch (e: any) {
     return res.status(500).json({ success: false, error: e.message });
   }
@@ -642,13 +659,13 @@ app.get('/api/index/crawl', async (req, res) => {
 
 // /api/index/status — overall index and scrape progress at a glance
 app.get('/api/index/status', (req, res) => {
-  const { crawlInProgress: crawling } = require('./src/notebookcheck_index');
+  const stats = getLastCrawlStats();
   return res.json({
     success: true,
-    index: { totalUrls: indexStore.size, lastCrawledAt: lastCrawlStats?.lastCrawledAt ?? null, crawlInProgress: crawling },
+    index: { totalUrls: indexStore.size, lastCrawledAt: stats?.lastCrawledAt ?? null, crawlInProgress: getCrawlInProgress() },
     scrape: { ...getQueueStats(), bulkActive: isBulkScrapeActive() },
     brands: Object.fromEntries(Object.entries(getBrandBreakdown()).slice(0, 20)),
-    lastCrawl: lastCrawlStats,
+    lastCrawl: stats,
   });
 });
 
@@ -784,7 +801,7 @@ app.get('/api/index/entry', (req, res) => {
 app.get('/api/index/reload', async (req, res) => {
   try {
     const count = await loadIndexFromRedis();
-    return res.json({ success: true, loaded: count, queue: getQueueStats() });
+    return res.json({ success: true, loaded: count, queue: getQueueStats(), lastCrawl: getLastCrawlStats() });
   } catch (e: any) {
     return res.status(500).json({ success: false, error: e.message });
   }
@@ -796,6 +813,97 @@ app.get('/api/index/clear', (req, res) => {
   if (isBulkScrapeActive()) return res.status(409).json({ success: false, error: 'Cannot clear while bulk scrape is running' });
   clearIndex();
   return res.json({ success: true, message: 'Index cleared' });
+});
+
+// /api/index/crawl-debug — fetch the NBC listings page raw and show what links were found
+// USE THIS FIRST to verify your server can reach NBC and see the URL format
+// ?url=   override the listing URL to test
+// ?raw=true   include first 3000 chars of HTML in response
+app.get('/api/index/crawl-debug', async (req, res) => {
+  const axios = (await import('axios')).default;
+  const cheerio = await import('cheerio');
+
+  const urlsToTry = [
+    req.query.url as string || '',
+    'https://www.notebookcheck.net/Reviews.55.0.html?cat=Smartphones',
+    'https://www.notebookcheck.net/Smartphones.1311.0.html',
+    'https://www.notebookcheck.net/Reviews.55.0.html',
+  ].filter(Boolean);
+
+  const results: any[] = [];
+
+  for (const testUrl of urlsToTry) {
+    const t0 = Date.now();
+    try {
+      const resp = await axios.get(testUrl, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.9',
+          'Referer': 'https://www.notebookcheck.net/',
+        },
+        timeout: 12000,
+        maxRedirects: 5,
+      });
+
+      const html = typeof resp.data === 'string' ? resp.data : JSON.stringify(resp.data);
+      const $ = cheerio.load(html);
+
+      // Extract ALL links matching the NBC article pattern
+      const allLinks: string[] = [];
+      const reviewLinks: string[] = [];
+      $('a[href]').each((_: any, el: any) => {
+        let href = $(el).attr('href') || '';
+        if (href.startsWith('/')) href = 'https://www.notebookcheck.net' + href;
+        href = href.split('?')[0];
+        if (!href.includes('notebookcheck.net')) return;
+        if (!/\.\d{4,}\.0\.html$/.test(href)) return;
+        allLinks.push(href);
+        const slug = href.split('/').pop() || '';
+        if (/review|smartphone|phone/i.test(slug)) reviewLinks.push(href);
+      });
+
+      // Pagination links
+      const pageLinks: string[] = [];
+      $('a[href]').each((_: any, el: any) => {
+        const href = $(el).attr('href') || '';
+        if (/page=\d+/.test(href)) pageLinks.push(href);
+      });
+
+      results.push({
+        url: testUrl,
+        status: resp.status,
+        fetchMs: Date.now() - t0,
+        htmlLength: html.length,
+        allArticleLinks: allLinks.length,
+        reviewLinks: reviewLinks.length,
+        sampleReviewLinks: reviewLinks.slice(0, 5),
+        paginationLinks: [...new Set(pageLinks)].slice(0, 5),
+        htmlSnippet: req.query.raw === 'true' ? html.slice(0, 3000) : undefined,
+      });
+
+      // Stop after first successful URL with results
+      if (reviewLinks.length > 0) break;
+
+    } catch (e: any) {
+      results.push({
+        url: testUrl,
+        status: e?.response?.status || 0,
+        fetchMs: Date.now() - t0,
+        error: e.message,
+      });
+    }
+  }
+
+  const winner = results.find(r => (r.reviewLinks || 0) > 0);
+  return res.json({
+    success: !!winner,
+    diagnosis: winner
+      ? `Found ${winner.reviewLinks} review links at ${winner.url}`
+      : '❌ No review links found on any URL — check if your server can reach notebookcheck.net',
+    winner: winner || null,
+    allResults: results,
+  });
 });
 
 module.exports = app;
