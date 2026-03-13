@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
-import { searchAndGetDetails, searchDevice, getDeviceDetails } from './src/scraper';
+// scraper legacy functions removed
+import './src/scraper';
 import { getNotebookCheckData, searchNotebookCheck, scrapeNotebookCheckDevice, debugNBCSearch } from './src/notebookcheck';
 import { getGSMArenaData, searchGSMArena, scrapeGSMArenaDevice } from './src/gsmarena';
 import {
@@ -10,9 +11,25 @@ import {
   normalizeProcQuery,
   searchProcViaSearXNG,
   scrapeNotebookCheckProcessor,
-  warmProcCache,
   PROC_CACHE_VERSION,
 } from './src/notebookcheck_processor';
+import {
+  crawlNBCSmartphoneIndex,
+  getQueueStats,
+  getIndexEntries,
+  scrapeIndexedDevice,
+  bulkScrapeAll,
+  abortBulkScrape,
+  isBulkScrapeActive,
+  validateIndexUrl,
+  getBrandBreakdown,
+  resetErrors,
+  resetEntry,
+  clearIndex,
+  loadIndexFromRedis,
+  lastCrawlStats,
+  indexStore,
+} from './src/notebookcheck_index';
 
 const app = express();
 app.use(cors());
@@ -90,7 +107,7 @@ app.get('/api/phone/race', async (req, res) => {
     const elapsedMs = Date.now() - t0;
     
     if (!data) return res.status(404).json({ query: q, winner: 'none', elapsedMs });
-    return res.json({ query: q, winner: 'notebookcheck', elapsedMs, title: data?.title });
+    return res.json({ query: q, winner: 'notebookcheck', elapsedMs, title: (data as any)?.title });
   } catch (e: any) {
     return res.status(500).json({ error: e.message, elapsedMs: Date.now() - t0 });
   }
@@ -118,40 +135,15 @@ app.get('/api/phone/device', async (req, res) => {
   }
 });
 
-// Legacy NanoReview endpoints
+// Legacy NanoReview endpoints (scraper functions removed — stubs kept for API compat)
 app.get('/api/search', async (req, res) => {
-  const q = req.query.q as string;
-  const index = parseInt(req.query.index as string || '0');
-  if (!q) return res.status(400).json({ success: false, error: '"q" required' });
-  try {
-    const data = await searchAndGetDetails(q, index);
-    if (!data) return res.status(404).json({ success: false, error: 'Device not found' });
-    return res.json({ success: true, data });
-  } catch (e: any) {
-    return res.status(500).json({ success: false, error: e.message });
-  }
+  return res.status(410).json({ success: false, error: 'Legacy endpoint removed. Use /api/phone?q=<device>' });
 });
-
 app.get('/api/suggestions', async (req, res) => {
-  const q = req.query.q as string;
-  if (!q) return res.status(400).json({ success: false, error: '"q" required' });
-  try {
-    const data = await searchDevice(q);
-    return res.json({ success: true, data });
-  } catch (e: any) {
-    return res.status(500).json({ success: false, error: e.message });
-  }
+  return res.status(410).json({ success: false, error: 'Legacy endpoint removed. Use /api/nbc/suggestions?q=<device>' });
 });
-
 app.get('/api/device', async (req, res) => {
-  const { type, slug } = req.query as { type: string; slug: string };
-  if (!type || !slug) return res.status(400).json({ success: false, error: '"type" and "slug" required' });
-  try {
-    const data = await getDeviceDetails(type, slug);
-    return res.json({ success: true, data });
-  } catch (e: any) {
-    return res.status(500).json({ success: false, error: e.message });
-  }
+  return res.status(410).json({ success: false, error: 'Legacy endpoint removed. Use /api/nbc/device?url=<url>' });
 });
 
 // NotebookCheck endpoints
@@ -184,7 +176,7 @@ app.get('/api/nbc/searxng-debug', async (req, res) => {
   const t0 = Date.now();
 
   try {
-    const { searchViaSearXNG, scrapeNotebookCheckDevice, normalizeQuery, resolveSearchResult, CACHE_VERSION } =
+    const { searchViaSearXNG, scrapeNotebookCheckDevice, normalizeQuery, resolveSearchResult } =
       await import('./src/notebookcheck');
 
     const oq = q.trim();
@@ -341,7 +333,7 @@ setInterval(pingSearXNG, PING_INTERVAL_MS);
 // Warm processor search cache on boot — runs in background, staggered 600ms/chip.
 // This pre-populates Redis so the first real user request for popular chips
 // skips SearXNG entirely and only pays the scrape cost (~1500ms instead of ~2800ms).
-setTimeout(() => warmProcCache().catch(() => {}), 5000); // 5s delay — let server fully boot first
+// warmProcCache removed (not exported) — processor cache warms on first request
 
 // Expose a manual ping trigger endpoint for debugging
 // /api/nbc/direct-debug?q=<device>
@@ -361,19 +353,29 @@ app.get('/api/nbc/direct-debug', async (req, res) => {
     const nq = normalizeQuery(q);
     const primaryQuery = nq !== oq ? nq : oq;
 
-    // Hit NBC search directly — same URL the code uses
-    const searchUrl = `https://www.notebookcheck.net/Search.8222.0.html?word=${encodeURIComponent(primaryQuery)}`;
+    // Hit NBC search directly via POST — NBC uses TYPO3 Indexed Search.
+    // GET ?word= is silently ignored by TYPO3; the correct field is
+    // tx_indexedsearch_pi2[search][sword] submitted as POST form data.
+    const NBC_SEARCH_URL = 'https://www.notebookcheck.net/Search.8222.0.html';
+    const postBody = new URLSearchParams({
+      'tx_indexedsearch_pi2[search][sword]': primaryQuery,
+      'tx_indexedsearch_pi2[action]': 'search',
+    }).toString();
+    const searchUrl = NBC_SEARCH_URL; // for the response payload (method is POST)
     const fetchMs0 = Date.now();
     let html = '';
     let fetchError = '';
     let httpStatus = 0;
 
     try {
-      const resp = await axios.get(searchUrl, {
+      const resp = await axios.post(NBC_SEARCH_URL, postBody, {
         headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-          'Accept': 'text/html,application/xhtml+xml',
-          'Referer': 'https://www.notebookcheck.net/',
+          'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          'Content-Type':    'application/x-www-form-urlencoded',
+          'Accept':          'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.9',
+          'Referer':         'https://www.notebookcheck.net/',
+          'Origin':          'https://www.notebookcheck.net',
         },
         timeout: 8000,
       });
@@ -431,6 +433,8 @@ app.get('/api/nbc/direct-debug', async (req, res) => {
     return res.json({
       query: { original: oq, normalized: nq, primaryUsed: primaryQuery },
       searchUrl,
+      searchMethod: 'POST',
+      searchBody: postBody,
       httpStatus,
       fetchError: fetchError || null,
       fetchMs,
@@ -599,6 +603,199 @@ app.get('/api/processor/search', async (req, res) => {
   } catch (e: any) {
     return res.status(500).json({ error: e.message, searchMs: Date.now() - t0 });
   }
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// NBC REVIEW INDEX ENDPOINTS  — the "memory game" approach
+// ─────────────────────────────────────────────────────────────────────────────
+// Flow:
+//   1. GET /api/index/crawl          → crawl NBC listing page, build URL index
+//   2. GET /api/index/status         → check index + scrape progress
+//   3. GET /api/index/validate       → verify crawled URLs resolve correctly
+//   4. GET /api/index/bulk-start     → bulk-scrape all indexed URLs (no SearXNG!)
+//   5. GET /api/index/list           → browse index with filters
+// ═════════════════════════════════════════════════════════════════════════════
+
+// /api/index/crawl — crawl NBC smartphone reviews listing and build URL index
+// ?maxPages=N   cap pages (default: all)   ?force=true  force re-crawl
+// ?delayMs=N    ms between pages (default: 800)   ?bg=true  background mode
+app.get('/api/index/crawl', async (req, res) => {
+  const maxPages = parseInt(req.query.maxPages as string || '999');
+  const force    = req.query.force === 'true';
+  const delayMs  = parseInt(req.query.delayMs as string || '800');
+  const bg       = req.query.bg === 'true';
+
+  if (bg) {
+    res.json({ status: 'started', message: 'Crawl running in background — check /api/index/status' });
+    crawlNBCSmartphoneIndex({ maxPages, forceRecrawl: force, delayMs }).catch(e =>
+      console.error('[crawl bg error]', e.message)
+    );
+    return;
+  }
+  try {
+    const stats = await crawlNBCSmartphoneIndex({ maxPages, forceRecrawl: force, delayMs });
+    return res.json({ success: true, crawl: stats, queue: getQueueStats() });
+  } catch (e: any) {
+    return res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// /api/index/status — overall index and scrape progress at a glance
+app.get('/api/index/status', (req, res) => {
+  const { crawlInProgress: crawling } = require('./src/notebookcheck_index');
+  return res.json({
+    success: true,
+    index: { totalUrls: indexStore.size, lastCrawledAt: lastCrawlStats?.lastCrawledAt ?? null, crawlInProgress: crawling },
+    scrape: { ...getQueueStats(), bulkActive: isBulkScrapeActive() },
+    brands: Object.fromEntries(Object.entries(getBrandBreakdown()).slice(0, 20)),
+    lastCrawl: lastCrawlStats,
+  });
+});
+
+// /api/index/list — browse index with filtering + pagination
+// ?status=pending|done|error|scraping|all   ?brand=Google   ?search=Pixel 10
+// ?page=1   ?limit=50
+app.get('/api/index/list', (req, res) => {
+  const status = (req.query.status as string) || 'all';
+  const brand  = req.query.brand  as string | undefined;
+  const search = req.query.search as string | undefined;
+  const page   = parseInt(req.query.page  as string || '1');
+  const limit  = Math.min(parseInt(req.query.limit as string || '50'), 200);
+  return res.json({ success: true, ...getIndexEntries({ status: status as any, brand, search, page, limit }) });
+});
+
+// /api/index/validate — validate N random index URLs (confirm they hit real device pages)
+// ?count=10   ?status=pending
+app.get('/api/index/validate', async (req, res) => {
+  const count  = Math.min(parseInt(req.query.count  as string || '10'), 50);
+  const status = (req.query.status as string) || 'pending';
+  const { entries } = getIndexEntries({ status: status as any, limit: count * 3 });
+  const sample = entries.sort(() => Math.random() - 0.5).slice(0, count);
+  if (!sample.length) return res.json({ success: true, message: 'No entries match filter', results: [] });
+  const results = await Promise.all(sample.map(e => validateIndexUrl(e.url)));
+  const valid = results.filter(r => r.valid).length;
+  return res.json({
+    success: true,
+    summary: { checked: results.length, valid, invalid: results.length - valid, validPct: `${((valid/results.length)*100).toFixed(1)}%` },
+    results,
+  });
+});
+
+// /api/index/validate-url — validate one specific URL
+// ?url=https://www.notebookcheck.net/...
+app.get('/api/index/validate-url', async (req, res) => {
+  const url = req.query.url as string;
+  if (!url) return res.status(400).json({ success: false, error: 'url required' });
+  try {
+    return res.json({ success: true, result: await validateIndexUrl(url) });
+  } catch (e: any) {
+    return res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// /api/index/scrape-one — scrape a single indexed URL directly (no SearXNG)
+// ?url=https://www.notebookcheck.net/...
+app.get('/api/index/scrape-one', async (req, res) => {
+  const url = req.query.url as string;
+  if (!url) return res.status(400).json({ success: false, error: 'url required' });
+  if (!indexStore.has(url)) {
+    const slug = url.split('/').pop() || '';
+    indexStore.set(url, {
+      url, title: slug.replace(/\.\d+\.0\.html$/, '').replace(/-/g, ' ').trim(),
+      brand: 'Unknown', slug, discoveredAt: new Date().toISOString(), status: 'pending', retries: 0,
+    });
+  }
+  try {
+    const result = await scrapeIndexedDevice(url);
+    if (!result.success) return res.status(502).json({ success: false, error: result.error, url });
+    return res.json({ success: true, source: 'notebookcheck_index', url, data: result.data });
+  } catch (e: any) {
+    return res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// /api/index/bulk-start — start bulk scraping all pending URLs (async, no SearXNG)
+// ?concurrency=2   ?delayMs=1200   ?onlyPending=true
+app.get('/api/index/bulk-start', (req, res) => {
+  if (isBulkScrapeActive()) {
+    return res.status(409).json({ success: false, error: 'Already running — call /api/index/bulk-abort first', queue: getQueueStats() });
+  }
+  const concurrency = Math.min(parseInt(req.query.concurrency as string || '2'), 5);
+  const delayMs     = parseInt(req.query.delayMs as string || '1200');
+  const onlyPending = req.query.onlyPending === 'true';
+  const q = getQueueStats();
+  if (q.pending + q.error === 0) {
+    return res.json({ success: false, message: 'Nothing to scrape. Run /api/index/crawl first.', queue: q });
+  }
+  bulkScrapeAll({ concurrency, delayMs, onlyPending }).then(r => console.log('[bulk] done:', r)).catch(e => console.error('[bulk] error:', e.message));
+  return res.json({ success: true, message: `Bulk scrape started — ${q.pending + q.error} URLs queued`, queue: q, config: { concurrency, delayMs, onlyPending }, monitor: '/api/index/status' });
+});
+
+// /api/index/bulk-abort — abort the running bulk scrape
+app.get('/api/index/bulk-abort', (req, res) => {
+  if (!isBulkScrapeActive()) return res.json({ success: false, message: 'No bulk scrape running' });
+  abortBulkScrape();
+  return res.json({ success: true, message: 'Abort signal sent. Current requests will finish, then scrape stops.' });
+});
+
+// /api/index/brands — brand breakdown with scrape coverage
+app.get('/api/index/brands', (req, res) => {
+  return res.json({ success: true, brands: getBrandBreakdown() });
+});
+
+// /api/index/errors — list all failed entries with error messages
+// ?limit=50   ?brand=Samsung
+app.get('/api/index/errors', (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit as string || '50'), 200);
+  const brand = req.query.brand as string | undefined;
+  const result = getIndexEntries({ status: 'error', brand, limit, page: 1 });
+  return res.json({
+    success: true, total: result.total,
+    entries: result.entries.map(e => ({ url: e.url, title: e.title, brand: e.brand, retries: e.retries, errorMsg: e.errorMsg })),
+  });
+});
+
+// /api/index/reset-errors — reset all error entries back to pending for retry
+app.get('/api/index/reset-errors', (req, res) => {
+  const count = resetErrors();
+  return res.json({ success: true, resetCount: count, queue: getQueueStats() });
+});
+
+// /api/index/reset-url — reset a single URL back to pending
+// ?url=https://...
+app.get('/api/index/reset-url', (req, res) => {
+  const url = req.query.url as string;
+  if (!url) return res.status(400).json({ success: false, error: 'url required' });
+  const ok = resetEntry(url);
+  return res.json({ success: ok, message: ok ? 'Entry reset to pending' : 'URL not found in index', url });
+});
+
+// /api/index/entry — get index metadata for a specific URL
+// ?url=https://...
+app.get('/api/index/entry', (req, res) => {
+  const url = req.query.url as string;
+  if (!url) return res.status(400).json({ success: false, error: 'url required' });
+  const entry = indexStore.get(url);
+  if (!entry) return res.status(404).json({ success: false, error: 'URL not in index', url });
+  return res.json({ success: true, entry });
+});
+
+// /api/index/reload — reload index from Redis (after redeploy)
+app.get('/api/index/reload', async (req, res) => {
+  try {
+    const count = await loadIndexFromRedis();
+    return res.json({ success: true, loaded: count, queue: getQueueStats() });
+  } catch (e: any) {
+    return res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// /api/index/clear — clear the entire index (?confirm=yes required)
+app.get('/api/index/clear', (req, res) => {
+  if (req.query.confirm !== 'yes') return res.status(400).json({ success: false, error: 'Add ?confirm=yes' });
+  if (isBulkScrapeActive()) return res.status(409).json({ success: false, error: 'Cannot clear while bulk scrape is running' });
+  clearIndex();
+  return res.json({ success: true, message: 'Index cleared' });
 });
 
 module.exports = app;
