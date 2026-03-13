@@ -1092,7 +1092,7 @@ export async function migrateToReviewUrls(batchSize = 200): Promise<MigrateResul
   await rSet(MIGRATE_CURSOR_KEY, newCursor, 30 * 24 * 3600);
   await rSet(MIGRATE_STATS_KEY,  stats,     30 * 24 * 3600);
 
-  // On completion: rebuild search index and clear migration state
+  // On completion: rebuild search index and clear migration states
   if (done) {
     await rebuildSearchIndex();
     await rDel(MIGRATE_CURSOR_KEY);
