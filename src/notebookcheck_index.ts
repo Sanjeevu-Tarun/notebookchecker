@@ -28,7 +28,10 @@ const PROGRESS_KEY  = `nbc:index:${INDEX_VERSION}:crawl_progress`;
 const ENTRIES_TTL   = 30 * 24 * 3600;
 const LOCK_TTL      = 300;
 
-const NBC_REVIEWS_BASE = 'https://www.notebookcheck.net/Reviews.55.0.html';
+// Smartphone-specific listing pages on NotebookCheck
+// Reviews.55.0.html = all reviews (mostly laptops), Smartphones.155.0.html = phones only
+const NBC_REVIEWS_BASE  = 'https://www.notebookcheck.net/Reviews.55.0.html';
+const NBC_PHONES_BASE   = 'https://www.notebookcheck.net/Smartphones.155.0.html';
 
 // ── TYPES ─────────────────────────────────────────────────────────────────────
 
@@ -230,7 +233,8 @@ export interface CrawlPageResult {
 
 export async function crawlOnePage(page: number): Promise<CrawlPageResult> {
   const t0  = Date.now();
-  const url = page === 1 ? NBC_REVIEWS_BASE : `${NBC_REVIEWS_BASE}?&ns_page=${page}`;
+  // Use the dedicated Smartphones listing page — covers all phone reviews including newest
+  const url = page === 1 ? NBC_PHONES_BASE : `${NBC_PHONES_BASE}?&ns_page=${page}`;
   const html = await fetchHtml(url);
   const found = extractPhoneUrls(html);
 

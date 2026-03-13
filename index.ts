@@ -846,7 +846,7 @@ app.get('/api/index/clear', async (req, res) => {
 app.get('/api/index/crawl-debug', async (req, res) => {
   const axios2 = (await import('axios')).default;
   const cheerio2 = await import('cheerio');
-  const testUrl = (req.query.url as string) || 'https://www.notebookcheck.net/Reviews.55.0.html';
+  const testUrl = (req.query.url as string) || 'https://www.notebookcheck.net/Smartphones.155.0.html';
   const t0 = Date.now();
   try {
     const resp = await axios2.get(testUrl, {
