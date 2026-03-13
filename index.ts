@@ -32,6 +32,7 @@ import {
   rebuildSearchIndex,
   searchIndex,
   migrateToReviewUrls,
+  resetMigration,
   type CrawlPageResult,
   type MigrateResult,
 } from './src/notebookcheck_index';
@@ -828,24 +829,26 @@ app.get('/api/index/reset-errors', async (req, res) => {
   }
 });
 
-// /api/index/migrate-review-urls — one-shot: upgrade all library URLs to NBC internal review URLs
-// Safe to call multiple times — already-resolved entries are skipped via Redis cache.
-// Run this once after deploying the crawl fix to fix all existing index entries without re-crawling.
+// /api/index/migrate-review-urls — resumable batch migration
+// Each call processes `batch` entries (default 200) and returns JSON.
+// Call repeatedly until response contains "done": true.
+// Progress is saved in Redis so Vercel timeouts are safe — just call again.
+//
+// Usage:
+//   GET /api/index/migrate-review-urls          → processes next 200 entries
+//   GET /api/index/migrate-review-urls?batch=100 → smaller batches (slower but safer)
+//   GET /api/index/migrate-review-urls?reset=1   → restart from beginning
 app.get('/api/index/migrate-review-urls', async (req, res) => {
   try {
-    res.setHeader('Content-Type', 'text/plain');
-    res.setHeader('Transfer-Encoding', 'chunked');
-    res.flushHeaders();
-
-    const result = await migrateToReviewUrls((progress) => {
-      res.write(JSON.stringify(progress) + '\n');
-    });
-
-    res.write(JSON.stringify({ success: true, done: true, ...result }) + '\n');
-    res.end();
+    if (req.query.reset === '1') {
+      await resetMigration();
+      return res.json({ success: true, message: 'Migration reset. Call again to start.' });
+    }
+    const batchSize = Math.min(parseInt(req.query.batch as string || '200'), 500);
+    const result = await migrateToReviewUrls(batchSize);
+    return res.json({ success: true, ...result });
   } catch (e: any) {
-    res.write(JSON.stringify({ success: false, error: e.message }) + '\n');
-    res.end();
+    return res.status(500).json({ success: false, error: e.message });
   }
 });
 

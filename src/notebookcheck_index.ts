@@ -628,58 +628,97 @@ export async function resetCrawlLock(): Promise<void> {
   await rDel(LOCK_KEY); await rDel(PROGRESS_KEY);
 }
 
-// ── ONE-SHOT MIGRATION: upgrade all existing library URLs to internal review URLs ──
-// The Chronological page always stores library URLs (e.g. Samsung-Galaxy-S25-Ultra.975474.0.html).
-// This migration fetches each library page, finds the NBC internal review link (-review- slug),
-// and replaces the stored URL in the index. Safe to run multiple times — already-resolved
-// entries are skipped (their resolve cache returns instantly from Redis).
+// ── RESUMABLE MIGRATION: upgrade library URLs to NBC internal review URLs ────────
+// Processes entries in fixed-size batches (default 200). Each call saves progress
+// to Redis and returns. Call repeatedly until done=true — safe across Vercel timeouts.
 //
-// Progress: streams back { done, total, upgraded, alreadyReview, noReview, errors } per batch.
-// Call GET /api/index/migrate-review-urls to run it.
+// Redis key: nbc:migrate:cursor  — index into the URL list where next call resumes
+// Redis key: nbc:migrate:stats   — cumulative upgraded/noReview/errors counts
 //
+// Call: GET /api/index/migrate-review-urls?batch=200
+// Keep calling until the response contains "done": true
+//
+
+const MIGRATE_CURSOR_KEY = 'nbc:migrate:cursor';
+const MIGRATE_STATS_KEY  = 'nbc:migrate:stats';
+
 export interface MigrateResult {
-  total: number; upgraded: number; alreadyReview: number; noReview: number; errors: number; durationMs: number;
+  total: number; processed: number; remaining: number;
+  upgraded: number; alreadyReview: number; noReview: number; errors: number;
+  durationMs: number; done: boolean;
 }
 
-export async function migrateToReviewUrls(onProgress?: (p: MigrateResult) => void): Promise<MigrateResult> {
+export async function migrateToReviewUrls(batchSize = 200): Promise<MigrateResult> {
   const t0 = Date.now();
   const entries = await loadEntries();
-  const urls = Object.keys(entries);
+  // Sort URLs for stable ordering across calls
+  const urls = Object.keys(entries).sort();
   const total = urls.length;
 
-  let upgraded = 0, alreadyReview = 0, noReview = 0, errors = 0;
+  // Load cursor (where we left off) and cumulative stats
+  let cursor = 0;
+  try { cursor = (await rGet(MIGRATE_CURSOR_KEY) as number) ?? 0; } catch { cursor = 0; }
 
+  let stats = { upgraded: 0, alreadyReview: 0, noReview: 0, errors: 0 };
+  try { stats = (await rGet(MIGRATE_STATS_KEY) as typeof stats) ?? stats; } catch { /* fresh start */ }
+
+  // If already finished, return immediately
+  if (cursor >= total) {
+    return { total, processed: total, remaining: 0, ...stats, durationMs: Date.now() - t0, done: true };
+  }
+
+  // Process this batch
+  const batch = urls.slice(cursor, cursor + batchSize);
   const CONCURRENCY = 8;
-  for (let i = 0; i < urls.length; i += CONCURRENCY) {
-    const batch = urls.slice(i, i + CONCURRENCY);
-    await Promise.all(batch.map(async (oldUrl) => {
+
+  for (let i = 0; i < batch.length; i += CONCURRENCY) {
+    const chunk = batch.slice(i, i + CONCURRENCY);
+    await Promise.all(chunk.map(async (oldUrl) => {
       try {
-        // Already an internal review URL — nothing to do
-        if (/-review-/i.test(oldUrl)) { alreadyReview++; return; }
+        if (/-review-/i.test(oldUrl)) { stats.alreadyReview++; return; }
 
         const newUrl = await resolveToReviewUrl(oldUrl);
 
-        if (newUrl === oldUrl) { noReview++; return; } // no NBC review found yet
+        if (newUrl === oldUrl) { stats.noReview++; return; }
 
-        // Swap the entry: delete old key, insert under new URL
+        // Swap: delete library URL, insert review URL
         if (!entries[newUrl]) {
           entries[newUrl] = { ...entries[oldUrl], url: newUrl, slug: newUrl.split('/').pop() || '' };
         }
         delete entries[oldUrl];
-        upgraded++;
+        stats.upgraded++;
       } catch {
-        errors++;
+        stats.errors++;
       }
     }));
-
-    if (onProgress) onProgress({ total, upgraded, alreadyReview, noReview, errors, durationMs: Date.now() - t0 });
   }
 
+  // Save upgraded entries back to Redis
   await saveEntries(entries);
-  // Rebuild search index so it reflects the new URLs
-  await rebuildSearchIndex();
 
-  return { total, upgraded, alreadyReview, noReview, errors, durationMs: Date.now() - t0 };
+  // Advance cursor and save stats
+  const newCursor = cursor + batch.length;
+  const done = newCursor >= total;
+
+  await rSet(MIGRATE_CURSOR_KEY, newCursor, 30 * 24 * 3600);
+  await rSet(MIGRATE_STATS_KEY,  stats,     30 * 24 * 3600);
+
+  // On completion: rebuild search index and clear migration state
+  if (done) {
+    await rebuildSearchIndex();
+    await rDel(MIGRATE_CURSOR_KEY);
+    await rDel(MIGRATE_STATS_KEY);
+  }
+
+  return {
+    total, processed: newCursor, remaining: Math.max(0, total - newCursor),
+    ...stats, durationMs: Date.now() - t0, done,
+  };
+}
+
+export async function resetMigration(): Promise<void> {
+  await rDel(MIGRATE_CURSOR_KEY);
+  await rDel(MIGRATE_STATS_KEY);
 }
 
 export async function validateIndexUrl(url: string): Promise<{ url: string; valid: boolean; h1?: string; error?: string; checkMs: number }> {
