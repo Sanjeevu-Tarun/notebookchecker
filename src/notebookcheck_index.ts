@@ -4,7 +4,7 @@ import * as cheerio from 'cheerio';
 // ══════════════════════════════════════════════════════════════════════════════
 //  NOTEBOOKCHECK REVIEW INDEX — VERCEL SERVERLESS EDITION
 //
-//  KEY INSIGHT: Vercel = every request is a fresh process. Zero in-memory state.
+//  KEY INSIGHT: Vercel = every request is a fresh process. Zero in-memory state..
 //  ALL state lives in Upstash Redis. Every function reads/writes Redis directly.
 //
 //  REDIS KEYS:
