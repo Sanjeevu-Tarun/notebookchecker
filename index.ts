@@ -868,6 +868,39 @@ app.get('/api/index/clear', async (req, res) => {
   }
 });
 
+// /api/index/library-debug — verify NBC library URL works and finds phone aggregator pages
+app.get('/api/index/library-debug', async (req, res) => {
+  const page = parseInt(req.query.page as string || '1');
+  const t0 = Date.now();
+  try {
+    const axios2 = (await import('axios')).default;
+    const { extractPhoneUrls } = await import('./src/notebookcheck_index');
+    const LIBRARY_BASE = 'https://www.notebookcheck.net/Library.279.0.html?stype=2';
+    const url = page === 1 ? LIBRARY_BASE : `${LIBRARY_BASE}&ns_page=${page}`;
+    const resp = await axios2.get(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36' },
+      timeout: 12000,
+    });
+    const html = typeof resp.data === 'string' ? resp.data : JSON.stringify(resp.data);
+    const phones = extractPhoneUrls(html);
+    // Look specifically for aggregator-style URLs (no -review in slug)
+    const aggregatorUrls = phones.filter(p => !/-review\.\d+\.0\.html$/i.test(p.url));
+    const reviewUrls     = phones.filter(p =>  /-review\.\d+\.0\.html$/i.test(p.url));
+    return res.json({
+      success: phones.length > 0,
+      page, url, fetchMs: Date.now() - t0,
+      htmlLength: html.length, httpStatus: resp.status,
+      total: phones.length,
+      aggregatorPages: aggregatorUrls.length,
+      reviewPages: reviewUrls.length,
+      sampleAggregator: aggregatorUrls.slice(0, 5).map(p => ({ url: p.url, title: p.title.slice(0, 80) })),
+      sampleReviews:    reviewUrls.slice(0, 3).map(p => ({ url: p.url, title: p.title.slice(0, 80) })),
+    });
+  } catch (e: any) {
+    return res.status(500).json({ success: false, error: e.message, fetchMs: Date.now() - t0 });
+  }
+});
+
 // /api/index/crawl-debug — test connectivity + phone link detection
 app.get('/api/index/crawl-debug', async (req, res) => {
   const axios2 = (await import('axios')).default;

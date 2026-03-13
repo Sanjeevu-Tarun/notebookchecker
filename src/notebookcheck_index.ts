@@ -35,7 +35,10 @@ const NBC_PHONES_BASE   = 'https://www.notebookcheck.net/Smartphones.155.0.html'
 // NBC Library: device database pages (spec/aggregator pages for devices NBC tracks but
 // hasn't written a full review for, e.g. Vivo-X200.919417.0.html). These never appear
 // on the Smartphones listing but ARE discoverable via the Library filtered to smartphones.
-const NBC_LIBRARY_BASE  = 'https://www.notebookcheck.net/Smartphone.305158.0.html';
+// NBC Library filtered to smartphones (stype=2). Paginated same as reviews listing.
+// This surfaces aggregator/spec pages (e.g. Vivo-X200.919417.0.html) that never appear
+// on the Smartphones reviews listing because NBC didn't write the review themselves.
+const NBC_LIBRARY_BASE  = 'https://www.notebookcheck.net/Library.279.0.html?stype=2';
 
 // ── TYPES ─────────────────────────────────────────────────────────────────────
 
@@ -251,12 +254,13 @@ export async function crawlOnePage(page: number): Promise<CrawlPageResult> {
   // ── Source 2: NBC device library (aggregator/spec pages for devices NBC tracks
   //    but hasn't reviewed itself — e.g. Vivo-X200.919417.0.html). These are
   //    sorted by date added and paginate the same way as the reviews listing.
-  const libraryUrl  = page === 1 ? NBC_LIBRARY_BASE : `${NBC_LIBRARY_BASE}?&ns_page=${page}`;
+  // Library base already has ?stype=2, so pagination appends &ns_page=N
+  const libraryUrl  = page === 1 ? NBC_LIBRARY_BASE : `${NBC_LIBRARY_BASE}&ns_page=${page}`;
 
   // Fetch both sources in parallel — independent pages, no dependency between them
   const [reviewsHtml, libraryHtml] = await Promise.all([
     fetchHtml(reviewsUrl),
-    fetchHtml(libraryUrl).catch(() => ''), // library is best-effort; don't abort crawl if it 503s
+    (async () => { try { return await fetchHtml(libraryUrl, 12000); } catch { return ''; } })(), // library best-effort
   ]);
 
   const foundFromReviews = extractPhoneUrls(reviewsHtml);
