@@ -389,35 +389,60 @@ const SEARCH_INDEX_KEY = `nbc:index:v3:search_index`;
 
 export async function rebuildSearchIndex(): Promise<void> {
   const entries = await loadEntries();
+  // Store raw title (snippet included) — cleanIndexTitle() strips it at query time
   const flat = Object.values(entries).map((e: IndexEntry) => ({ url: e.url, title: e.title, slug: e.slug }));
   await rSetPermanent(SEARCH_INDEX_KEY, flat);
 }
 
+// Strip the stored snippet from the title — index stores "88% Clean Title...snippet text"
+// We only want to match against the clean review title, not the preview blurb
+function cleanIndexTitle(raw: string): string {
+  // Remove leading rating like "88% "
+  let t = raw.replace(/^\d+%\s*/, '');
+  // The clean title ends at the first occurrence of the subtitle/snippet separator
+  // Titles look like: "Samsung Galaxy S25 Ultra review - The AI phone...SubtitleText"
+  // Snippets are appended directly after the title with no separator in some entries
+  // Safest: take only up to the first sentence end or 120 chars of the first segment
+  // Split on common title-end patterns: " review" boundary or truncate after ~100 chars of title
+  const reviewIdx = t.search(/\breview\b/i);
+  if (reviewIdx !== -1) {
+    // Include "review" and a few chars after (e.g. " review - subtitle") but cut the snippet
+    const dashIdx = t.indexOf(' - ', reviewIdx);
+    t = dashIdx !== -1 ? t.slice(0, dashIdx) : t.slice(0, reviewIdx + 10);
+  } else {
+    t = t.slice(0, 120);
+  }
+  return t.toLowerCase().trim();
+}
+
 // Same scoring as GSMArena resolver — all words must match, variant penalty system
 function scoreIndexMatch(entryTitle: string, query: string): number {
-  const d = entryTitle.toLowerCase();
+  // Score only against the clean title, NOT the snippet (which may contain false word matches)
+  const d = cleanIndexTitle(entryTitle);
   const q = query.toLowerCase().trim();
   const qWords = q.split(/\s+/).filter((w: string) => w.length > 1);
 
-  // ALL query words must appear in the title — hard reject otherwise
-  if (!qWords.every((w: string) => d.includes(w))) return -1;
+  // ALL query words must appear as whole words in the clean title — hard reject otherwise
+  // Use word boundary check: " word " or start/end — prevents "ultra" matching "ultra-slim"
+  const wordIn = (word: string, text: string) =>
+    new RegExp(`(?<![a-z0-9])${word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![a-z0-9])`).test(text);
+
+  if (!qWords.every((w: string) => wordIn(w, d))) return -1;
 
   // Exact or substring match
   if (d === q) return 10000;
   if (d.includes(q)) return 8000;
 
   // Penalise entries that have variant words the query didn't ask for
-  // e.g. query="s25 ultra" → "S25 Edge" gets -2000 for "edge" not in query
-  // e.g. query="s25 ultra" → "S25 Ultra review" scores clean
   const variants = ['ultra', 'pro', 'plus', 'mini', 'lite', 'fe', 'max', 'edge', 'standard', 'turbo', 'fold', 'flip'];
   const lastQWord = qWords[qWords.length - 1];
   let penalty = 0;
   for (const v of variants) {
-    if (v !== lastQWord && d.includes(' ' + v) && !q.includes(v)) penalty += 2000;
+    if (v !== lastQWord && wordIn(v, d) && !q.includes(v)) penalty += 2000;
   }
 
   // Bonus for shorter title (fewer extra words = more precise match)
-  const lengthBonus = Math.max(0, 500 - entryTitle.length * 5);
+  const lengthBonus = Math.max(0, 500 - d.length * 5);
 
   return 5000 - penalty + lengthBonus;
 }
