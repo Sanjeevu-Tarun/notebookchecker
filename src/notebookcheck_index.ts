@@ -123,54 +123,45 @@ async function rSetNX(k: string, v: string, ttl: number): Promise<boolean> {
   } catch { return false; }
 }
 
-async function rKeys(pattern: string): Promise<string[]> {
-  const { url, token } = rBase();
-  const r = await _rax.get(`${url}/keys/${encodeURIComponent(pattern)}`,
-    { headers: { Authorization: `Bearer ${token}` } });
-  return r.data?.result ?? [];
-}
-
 // ── RECOVER DELETED REVIEW URLS ───────────────────────────────────────────────
-// If purgeLibraryDuplicates accidentally deleted internal review entries,
-// this function recovers them from the resolve cache (nbc:review_resolve:* keys).
-// The cache stores: libraryUrl → reviewUrl, so we can re-add all review URLs.
-export async function recoverDeletedReviewUrls(): Promise<{ recovered: number; alreadyPresent: number }> {
+// Looks at all library URLs currently in the index, calls resolveToReviewUrl on each
+// (hits Redis cache instantly — no live fetches needed), and adds the review URL if missing.
+// Much faster than scanning Redis keys — works purely from existing entries + resolve cache.
+export async function recoverDeletedReviewUrls(): Promise<{ recovered: number; alreadyPresent: number; totalCacheKeys: number }> {
   const entries = await loadEntries();
-  const cacheKeys = await rKeys('nbc:review_resolve:*');
+
+  // Find all library URLs still in the index (non-review URLs)
+  const libraryUrls = Object.keys(entries).filter(u => !/-review-/i.test(u));
+  const totalCacheKeys = libraryUrls.length;
 
   let recovered = 0, alreadyPresent = 0;
 
-  for (const ck of cacheKeys) {
-    let reviewUrl: string;
-    try {
-      reviewUrl = await rGet(ck) as string;
-    } catch { continue; }
+  // Resolve in parallel batches of 20 — hits Redis resolve cache, no live HTTP fetches
+  const CONCURRENCY = 20;
+  for (let i = 0; i < libraryUrls.length; i += CONCURRENCY) {
+    const batch = libraryUrls.slice(i, i + CONCURRENCY);
+    await Promise.all(batch.map(async (libraryUrl) => {
+      try {
+        const reviewUrl = await resolveToReviewUrl(libraryUrl);
+        if (!reviewUrl || reviewUrl === libraryUrl) return; // no review found
 
-    // Only care about keys that resolved to a review URL
-    if (!reviewUrl || !/-review-/i.test(reviewUrl)) continue;
+        if (entries[reviewUrl]) { alreadyPresent++; return; }
 
-    if (entries[reviewUrl]) {
-      alreadyPresent++;
-      continue;
-    }
+        // Review URL missing from index — re-add it
+        // Derive clean title from slug: "Samsung-Galaxy-S25-Ultra-review-....0.html" → "Samsung Galaxy S25 Ultra"
+        const slug = reviewUrl.split('/').pop() || '';
+        const rawTitle = slug.split('-review-')[0].replace(/-/g, ' ').trim();
+        const title = rawTitle.split(' ').map((w: string) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
 
-    // Re-add the review entry. Derive title from the slug:
-    // "Samsung-Galaxy-S25-Ultra-review-The-AI-phone....968346.0.html"
-    // → split on "-review-" → take first part → replace hyphens → "Samsung Galaxy S25 Ultra"
-    const slug = reviewUrl.split('/').pop() || '';
-    const rawTitle = slug.split('-review-')[0].replace(/-/g, ' ').replace(/\.\d+\.0\.html$/, '').trim();
-    const title = rawTitle.split(' ').map((w: string) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
-
-    entries[reviewUrl] = {
-      url: reviewUrl,
-      title,
-      brand: extractBrand(title),
-      slug,
-      discoveredAt: new Date().toISOString(),
-      status: 'pending',
-      retries: 0,
-    };
-    recovered++;
+        entries[reviewUrl] = {
+          url: reviewUrl, title,
+          brand: extractBrand(title), slug,
+          discoveredAt: new Date().toISOString(),
+          status: 'pending', retries: 0,
+        };
+        recovered++;
+      } catch { /* skip on error */ }
+    }));
   }
 
   if (recovered > 0) {
@@ -178,7 +169,7 @@ export async function recoverDeletedReviewUrls(): Promise<{ recovered: number; a
     await rebuildSearchIndex();
   }
 
-  return { recovered, alreadyPresent };
+  return { recovered, alreadyPresent, totalCacheKeys };
 }
 
 // ── ENTRY STORE ───────────────────────────────────────────────────────────────
