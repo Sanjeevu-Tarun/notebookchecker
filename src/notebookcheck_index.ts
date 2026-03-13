@@ -461,7 +461,7 @@ export async function crawlReviewsPage(page: number): Promise<CrawlPageResult> {
   await rSet(PROGRESS_KEY, { page, totalUrls, startedAt: new Date().toISOString(), updatedAt: new Date().toISOString() }, LOCK_TTL);
 
   return { page, phonesFound: found.length, totalUrls, newUrls,
-    done: pageIsEmpty || found.length === 0, nextPage: pageIsEmpty ? null : page + 1,
+    done: pageIsEmpty, nextPage: page + 1,
     durationMs: Date.now() - t0, source: 'reviews' };
 }
 

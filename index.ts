@@ -1635,7 +1635,7 @@ async function startA() {
   aStop = false;
   let page = parseInt(document.getElementById('aStart').value) || 1;
   let pages = 0, newTotal = 0, lastIdx = 0, empty = 0;
-  const MAXP = 80;
+  const MAXP = 150;
   document.getElementById('btnStartA').disabled = true;
   document.getElementById('btnStopA').style.display = 'inline-flex';
   setDot('dotA', 'run');
@@ -1645,11 +1645,12 @@ async function startA() {
     document.getElementById('aStart').value = page;
     try {
       const r = await fetch('/api/index/crawl-reviews-page?page=' + page);
-      if (!r.ok) { logLine('logA', 'p' + page + ' HTTP ' + r.status, 'err'); await sleep(2500); page++; continue; }
+      if (!r.ok) { logLine('logA', 'p' + page + ' HTTP ' + r.status, 'err'); await sleep(2500); page++; empty++; if (empty >= 5) { logLine('logA', '5 consecutive errors — stopping.', 'warn'); break; } continue; }
       const d = await r.json();
-      if (!d.success) { logLine('logA', 'p' + page + ': ' + (d.error || 'error'), 'err'); await sleep(2500); page++; continue; }
+      if (!d.success) { logLine('logA', 'p' + page + ': ' + (d.error || 'error'), 'err'); await sleep(2500); page++; empty++; if (empty >= 5) { logLine('logA', '5 consecutive errors — stopping.', 'warn'); break; } continue; }
       const res = d.result;
-      pages++; newTotal += res.newUrls; lastIdx = res.totalUrls; empty = res.phonesFound === 0 ? empty + 1 : 0;
+      pages++; newTotal += res.newUrls; lastIdx = res.totalUrls;
+      if (res.phonesFound === 0) { empty++; } else { empty = 0; }
       document.getElementById('aPages').textContent = pages;
       document.getElementById('aTotal').textContent = lastIdx;
       document.getElementById('aNew').textContent = newTotal;
@@ -1657,11 +1658,12 @@ async function startA() {
       document.getElementById('barA').style.width = pct + '%';
       document.getElementById('pctA').textContent = pct + '%';
       document.getElementById('labelA').textContent = 'p' + page + ' — ' + res.phonesFound + ' found, ' + res.newUrls + ' new';
-      logLine('logA', 'p' + page + ' → ' + res.phonesFound + ' reviews, ' + res.newUrls + ' new (index: ' + res.totalUrls + ')', res.newUrls > 0 ? 'ok' : 'info');
-      if (res.done || empty >= 3) { logLine('logA', 'Source A complete.', 'ok'); break; }
+      logLine('logA', 'p' + page + ' → ' + res.phonesFound + ' reviews, ' + res.newUrls + ' new (index: ' + res.totalUrls + ')', res.phonesFound > 0 ? 'ok' : 'info');
+      if (res.done) { logLine('logA', 'Source A complete (server says done).', 'ok'); break; }
+      if (empty >= 5) { logLine('logA', '5 consecutive empty pages — Source A complete.', 'ok'); break; }
       page++;
       await sleep(DELAY);
-    } catch(e) { logLine('logA', 'p' + page + ' error: ' + e.message, 'err'); await sleep(3000); page++; }
+    } catch(e) { logLine('logA', 'p' + page + ' error: ' + e.message, 'err'); await sleep(3000); page++; empty++; if (empty >= 5) break; }
   }
 
   document.getElementById('barA').style.width = '100%';
