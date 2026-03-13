@@ -1011,6 +1011,133 @@ app.get('/migrate', (req, res) => {
 </html>`);
 });
 
+// /recover — live UI for recovering deleted review URLs + purging library duplicates
+app.get('/recover', (req, res) => {
+  res.setHeader('Content-Type', 'text/html');
+  res.send(`<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>NBC Recovery — Restore Review URLs</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: monospace; background: #0d1117; color: #e6edf3; padding: 24px; }
+    h1 { font-size: 18px; color: #58a6ff; margin-bottom: 6px; }
+    .subtitle { font-size: 12px; color: #8b949e; margin-bottom: 20px; }
+    #status { font-size: 13px; color: #8b949e; margin-bottom: 16px; }
+    #stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 20px; }
+    .stat { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 14px; text-align: center; }
+    .stat .val { font-size: 28px; font-weight: bold; color: #58a6ff; }
+    .stat .lbl { font-size: 11px; color: #8b949e; margin-top: 4px; }
+    #recovered .val  { color: #3fb950; }
+    #present .val    { color: #d29922; }
+    #purged .val     { color: #f85149; }
+    #cachekeys .val  { color: #58a6ff; }
+    #log { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 12px;
+           height: 280px; overflow-y: auto; font-size: 11px; line-height: 1.7; }
+    .log-line       { color: #8b949e; }
+    .log-line.ok    { color: #3fb950; }
+    .log-line.done  { color: #58a6ff; font-weight: bold; font-size: 12px; }
+    .log-line.warn  { color: #d29922; }
+    .log-line.err   { color: #f85149; }
+    #btn { margin-top: 16px; padding: 9px 22px; background: #1f6feb; color: #fff;
+           border: none; border-radius: 6px; cursor: pointer; font-size: 13px; font-family: monospace; }
+    #btn:disabled { background: #30363d; color: #8b949e; cursor: not-allowed; }
+    #done-banner { display: none; margin-top: 16px; padding: 14px; background: #0d2942;
+                   border: 1px solid #1f6feb; border-radius: 6px; color: #58a6ff;
+                   font-size: 14px; text-align: center; }
+    .phase { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 10px;
+             font-weight: bold; margin-right: 6px; }
+    .phase-recover { background: #1f3a1f; color: #3fb950; }
+    .phase-purge   { background: #3a1f1f; color: #f85149; }
+    .phase-done    { background: #1a2a3a; color: #58a6ff; }
+  </style>
+</head>
+<body>
+  <h1>🔧 NBC Recovery — Restore Deleted Review URLs</h1>
+  <p class="subtitle">Scans Redis resolve cache → recovers deleted review entries → purges library duplicates</p>
+  <div id="status">Press Start to begin.</div>
+
+  <div id="stats">
+    <div class="stat" id="cachekeys"><div class="val" id="v-cachekeys">—</div><div class="lbl">Cache Keys Scanned</div></div>
+    <div class="stat" id="recovered"><div class="val" id="v-recovered">—</div><div class="lbl">Recovered ✅</div></div>
+    <div class="stat" id="present"><div class="val" id="v-present">—</div><div class="lbl">Already Present</div></div>
+    <div class="stat" id="purged"><div class="val" id="v-purged">—</div><div class="lbl">Dupes Purged 🗑</div></div>
+  </div>
+
+  <div id="log"></div>
+  <button id="btn" onclick="start()">▶ Start Recovery</button>
+  <div id="done-banner">✅ Recovery complete! Index is clean — only internal review URLs remain.</div>
+
+<script>
+  function log(msg, cls = '') {
+    const el = document.getElementById('log');
+    const d = document.createElement('div');
+    d.className = 'log-line ' + cls;
+    d.innerHTML = '[' + new Date().toLocaleTimeString() + '] ' + msg;
+    el.appendChild(d);
+    el.scrollTop = el.scrollHeight;
+  }
+
+  function setStatus(msg) {
+    document.getElementById('status').textContent = msg;
+  }
+
+  async function start() {
+    document.getElementById('btn').disabled = true;
+    document.getElementById('btn').textContent = '⏳ Running…';
+
+    try {
+      // ── STEP 1: Recover deleted review URLs ──────────────────────────────
+      setStatus('Step 1/2 — Scanning Redis cache and recovering deleted review URLs…');
+      log('<span class="phase phase-recover">RECOVER</span> Scanning nbc:review_resolve:* cache keys…');
+
+      const rr = await fetch('/api/index/recover-review-urls').then(r => r.json());
+
+      if (!rr.success) throw new Error(rr.error);
+
+      document.getElementById('v-cachekeys').textContent = rr.totalCacheKeys ?? '—';
+      document.getElementById('v-recovered').textContent = rr.recovered;
+      document.getElementById('v-present').textContent   = rr.alreadyPresent;
+
+      if (rr.recovered > 0) {
+        log('<span class="phase phase-recover">RECOVER</span> ✅ Recovered ' + rr.recovered + ' deleted review entries (' + rr.alreadyPresent + ' were already present, ' + rr.totalCacheKeys + ' cache keys scanned)', 'ok');
+      } else {
+        log('<span class="phase phase-recover">RECOVER</span> Nothing to recover — all review URLs already present (' + rr.alreadyPresent + ' found, ' + rr.totalCacheKeys + ' cache keys scanned)', 'warn');
+      }
+
+      // ── STEP 2: Purge library duplicates ─────────────────────────────────
+      setStatus('Step 2/2 — Purging library duplicates and junk titles…');
+      log('<span class="phase phase-purge">PURGE</span> Scanning for library duplicates and junk title entries…');
+
+      const pr = await fetch('/api/index/purge-library-duplicates').then(r => r.json());
+
+      if (!pr.success) throw new Error(pr.error);
+
+      document.getElementById('v-purged').textContent = pr.purged;
+
+      log('<span class="phase phase-purge">PURGE</span> 🗑 Purged ' + pr.purged + ' entries — ' +
+          pr.reasons.libraryDuplicate + ' library dupes, ' +
+          pr.reasons.junkTitle + ' junk titles. ' + pr.kept + ' clean entries remain.', 'ok');
+
+      // ── DONE ─────────────────────────────────────────────────────────────
+      setStatus('✅ Done — ' + pr.kept + ' clean entries in index');
+      log('<span class="phase phase-done">DONE</span> Index rebuilt. Only internal review URLs (and library-only phones) remain.', 'done');
+      document.getElementById('done-banner').style.display = 'block';
+      document.getElementById('btn').textContent = '✅ Done';
+
+    } catch (e) {
+      log('❌ Error: ' + e.message, 'err');
+      setStatus('Error — check log');
+      document.getElementById('btn').disabled = false;
+      document.getElementById('btn').textContent = '▶ Retry';
+    }
+  }
+</script>
+</body>
+</html>`);
+});
+
 // /api/index/brands — brand coverage
 app.get('/api/index/brands', async (req, res) => {
   try {
