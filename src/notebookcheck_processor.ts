@@ -284,7 +284,7 @@ const PROC_CACHE_VERSION = (() => {
     'codename','totalCores','totalThreads','cpuClusters','baseClockMHz','boostClockMHz',
     'l2CacheTotal','l3Cache','l4Cache','systemLevelCache','gpu','npu','memory',
     'connectivity','media','security','power','specs','benchmarks','devicesUsing',
-    'description','performanceTier','images','_rev4',
+    'description','performanceTier','images',
   ].sort().join(',');
   let h = 5381;
   for (let i = 0; i < SCHEMA_FIELDS.length; i++) {
@@ -409,7 +409,7 @@ function normStr(s: string): string {
   return s.replace(/\u00a0/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
-async function procFetchUrl(url: string, timeoutMs = 4500, signal?: AbortSignal): Promise<string> {
+async function procFetchUrl(url: string, timeoutMs = 6000, signal?: AbortSignal): Promise<string> {
   for (let i = 0; i <= 1; i++) {
     if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     const ctrl = new AbortController();
@@ -422,11 +422,10 @@ async function procFetchUrl(url: string, timeoutMs = 4500, signal?: AbortSignal)
           'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
           'Accept-Language': 'en-US,en;q=0.9',
           'Accept-Encoding': 'gzip, deflate, br',
-          'Connection': 'keep-alive',
           'Referer': 'https://www.notebookcheck.net/',
         },
         timeout: timeoutMs,
-        maxRedirects: 2,
+        maxRedirects: 3,
         decompress: true,
         signal: ctrl.signal,
       });
@@ -437,7 +436,7 @@ async function procFetchUrl(url: string, timeoutMs = 4500, signal?: AbortSignal)
       if ((e as Error).name === 'AbortError') throw e;
       if (status && status >= 400 && status < 500) throw e;
       if (isLast) throw e;
-      await new Promise(res => setTimeout(res, 150)); // was 400ms — cut dead wait
+      await new Promise(res => setTimeout(res, 400));
     } finally {
       ctrl.abort();
       signal?.removeEventListener('abort', onAbort);
@@ -499,20 +498,8 @@ export function normalizeProcQuery(query: string): string {
       q = rep + q.slice(alias.length);
       break;
     }
-    // Only apply word-boundary replacement if the result wouldn't duplicate
-    // the replacement content (e.g. "mediatek dimensity 9" in "mediatek dimensity 9500"
-    // would produce "mediatek mediatek dimensity 9500")
     const esc = alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const rx = new RegExp('\\b' + esc + '\\b', 'gi');
-    if (rx.test(q)) {
-      const candidate = q.replace(new RegExp('\\b' + esc + '\\b', 'gi'), rep);
-      const firstWord = rep.split(/\s+/)[0];
-      const dupRx = new RegExp('\\b' + firstWord + '[\\s\\S]*?\\b' + firstWord + '\\b', 'i');
-      if (!dupRx.test(candidate)) {
-        q = candidate;
-        break;
-      }
-    }
+    q = q.replace(new RegExp('\\b' + esc + '\\b', 'gi'), rep);
   }
   return q.trim();
 }
@@ -535,13 +522,8 @@ function scoreProcCandidate(title: string, url: string, nq: string, oq: string):
   const isProcUrl = /processor-benchmarks-and-specs|soc.*benchmarks|cpu.*benchmarks/i.test(u)
     || /-Processor-|Benchmarks-and-Specs/i.test(u);
 
-  // Reject phone/tablet review pages — those are never processor spec pages
+  // Reject if the URL is clearly a phone review page
   if (/smartphone-review|phone-review|tablet-review/i.test(u)) return -1;
-  // Reject news/article pages (no spec data at all)
-  if (/\/news\/|topics\.\d|\.\d+\.0\.html.*[?&]/i.test(u)) return -1;
-  // Processor review pages (e.g. "AMD-Ryzen-9-9950X3D-Review-...") are allowed
-  // but scored much lower than spec pages — only used as last resort
-  const isReviewPage = /-review[^s]/i.test(u) && !/benchmarks-and-specs/i.test(u);
 
   const qWords = q.split(/\s+/).filter(w => w.length > 0);
   const urlSlug = (u.split('/').pop() || '').replace(/\.\d+\.\d+\.html$/, '').replace(/-/g, ' ').toLowerCase();
@@ -565,91 +547,100 @@ function scoreProcCandidate(title: string, url: string, nq: string, oq: string):
   if (t.includes('leak') || t.includes('rumor'))            score -= 800;
   if (t.includes('announced') || t.includes('unveiled'))    score -= 600;
   if (t.includes('external reviews') || u.includes('external-reviews')) score -= 2500;
-  // Review pages are last resort — only used when no spec page exists
-  if (isReviewPage)                                          score -= 3000;
 
   return score;
 }
 
 /** SearXNG search targeting NotebookCheck processor/SoC spec pages */
-export async function searchProcViaSearXNG(
-  nq: string,
-  oq: string,
-  signal?: AbortSignal,
-  onFirstHit?: (r: ProcessorSearchResult) => void,  // called the moment a high-confidence URL is found
-): Promise<ProcessorSearchResult[]> {
+export async function searchProcViaSearXNG(nq: string, oq: string, signal?: AbortSignal): Promise<ProcessorSearchResult[]> {
   const seen = new Set<string>();
   const all: ProcessorSearchResult[] = [];
   const base = 'https://searxng-notebookcheck.onrender.com';
-  let firstHitFired = false;
 
   if (procCircuitIsOpen(base)) return [];
 
-  // Deduplicate: if oq and nq are the same, only fire one query
-  const queries = oq.toLowerCase() === nq.toLowerCase() ? [nq] : [nq, oq];
-
   interface ExternalItem { url?: string; href?: string; title?: string; }
 
-  function parseItems(items: ExternalItem[]): void {
-    for (const item of items) {
-      const url   = (item.url || '').trim();
-      const title = (item.title || '').trim();
-      if (!url.includes('notebookcheck.net') || seen.has(url)) continue;
-      if (!/\.\d{4,}\.\d+\.html/.test(url) && !/benchmarks-and-specs/i.test(url)) continue;
-      const sc = scoreProcCandidate(title || url, url, nq, oq);
-      if (sc < 0) continue;
-      seen.add(url);
-      const hit = { url, title: title || url, score: sc };
-      all.push(hit);
-      // Fire onFirstHit callback the moment we get a high-confidence spec page
-      // so the caller can start scraping in parallel before all results are in
-      if (!firstHitFired && sc >= 3000 && onFirstHit) {
-        firstHitFired = true;
-        onFirstHit(hit);
-      }
-    }
-  }
+  // ── SINGLE QUERY STRATEGY ──────────────────────────────────────────────────
+  // Previously fired 2 parallel queries (oq + nq) against duckduckgo+bing.
+  // Problems:
+  //   1. Bing blocks Render IPs → times out at 4.5s → causes 10s+ total latency
+  //   2. DuckDuckGo rate-limits shared IPs → random null results
+  //   3. 2 parallel queries × 2 engines = 4 concurrent upstream requests from
+  //      a single Render free-tier container → CPU contention, slow responses
+  //
+  // Fix: single query, google engine only (set in settings.yml), 3s timeout.
+  // Google on Render responds in <2s consistently. One fast hit beats four
+  // slow unreliable ones.
+  //
+  // We pick the best of nq (normalized) vs oq (original): use nq if it differs
+  // from oq (it has expanded brand prefixes like "Qualcomm Snapdragon"), otherwise
+  // just oq. One network call total.
+  const searchQuery = nq !== oq ? nq : oq;
 
-  const doSearch = async (q: string) => {
+  const doSearch = async (q: string): Promise<ExternalItem[]> => {
     const resp = await procAxios.get(`${base}/search`, {
       params: {
-        q: `site:notebookcheck.net ${q} Benchmarks-and-Specs`,
+        q: `site:notebookcheck.net ${q} processor benchmarks specs`,
         format: 'json',
-        engines: 'google,bing',  // SPEED: Use google instead of duckduckgo
+        // No engines override — let settings.yml decide (Google only).
+        // Hardcoding engines here bypassed the settings.yml config and forced
+        // duckduckgo+bing even after we fixed settings.yml.
         categories: 'general',
       },
       headers: { 'User-Agent': procRandomUA(), 'Accept': 'application/json' },
-      timeout: 6000,  // SPEED: Increased from 4000 to 6000 for reliability
+      timeout: 3000,   // 3s — Google responds in <2s; if it hasn't by 3s it won't
       signal,
     });
     return (resp.data?.results || []) as ExternalItem[];
   };
 
+  // ── FALLBACK QUERY ─────────────────────────────────────────────────────────
+  // If the primary query returns no usable results, try the original query.
+  // This handles cases where brand normalization makes the query worse
+  // (e.g. a misspelled brand that NBC actually indexes as-is).
+  const tryQuery = async (q: string): Promise<ExternalItem[]> => {
+    try {
+      return await doSearch(q);
+    } catch (e) {
+      if ((e as Error).name === 'AbortError') throw e;
+      return [];
+    }
+  };
+
   try {
-    if (queries.length === 1) {
-      const items = await doSearch(queries[0]);
-      procCircuitRecordSuccess(base);
-      parseItems(items);
-    } else {
-      // Fire both queries, resolve as soon as first has a confident hit
-      let resolved = false;
-      const results = await new Promise<ExternalItem[][]>((resolve) => {
-        const out: ExternalItem[][] = [[], []];
-        let done = 0;
-        queries.forEach((q, i) => {
-          doSearch(q).then(items => {
-            out[i] = items;
-            done++;
-            if (!resolved) {
-              const hasHit = items.some(it => /benchmarks-and-specs/i.test(it.url || ''));
-              if (hasHit || done === queries.length) { resolved = true; resolve(out); }
-            }
-          }).catch(() => { done++; if (done === queries.length && !resolved) { resolved = true; resolve(out); } });
-        });
-        setTimeout(() => { if (!resolved) { resolved = true; resolve(out); } }, 3500);
-      });
-      procCircuitRecordSuccess(base);
-      for (const items of results) parseItems(items);
+    let items = await tryQuery(searchQuery);
+
+    // If primary returned nothing AND nq !== oq, try oq as fallback
+    if (items.length === 0 && nq !== oq) {
+      log('debug', 'proc.searxng.fallback', { primary: searchQuery, fallback: oq });
+      items = await tryQuery(oq);
+    }
+
+    procCircuitRecordSuccess(base);
+
+    for (const item of items) {
+      const url   = (item.url || '').trim();
+      const title = (item.title || '').trim();
+      if (!url.includes('notebookcheck.net') || seen.has(url)) continue;
+
+      // URL filter — accept NBC pages that look like processor spec pages.
+      // Previously this was too strict: required BOTH a 4-digit ID AND
+      // "benchmarks-and-specs" in URL. NBC SoC pages sometimes lack one.
+      // Now: accept if EITHER condition matches, or if the URL slug contains
+      // "processor" + "benchmark" (covers newer NBC URL formats).
+      const urlLower = url.toLowerCase();
+      const isNbcSpecPage =
+        /\.\d{4,}\.\d+\.html/.test(url) ||
+        /benchmarks-and-specs/i.test(url) ||
+        (/processor/i.test(url) && /benchmark/i.test(url)) ||
+        /soc.*spec|spec.*soc/i.test(urlLower);
+      if (!isNbcSpecPage) continue;
+
+      const sc = scoreProcCandidate(title || url, url, nq, oq);
+      if (sc < 0) continue;
+      seen.add(url);
+      all.push({ url, title: title || url, score: sc });
     }
   } catch (e) {
     if ((e as Error).name !== 'AbortError') {
@@ -671,7 +662,10 @@ async function searchProcessor(query: string): Promise<{ name: string; url: stri
   const oq  = query.trim();
   const nq  = normalizeProcQuery(query);
 
-  // Check cache first — skip SearXNG entirely on cache hit (saves ~1300ms)
+  // ── CHECK CACHE FIRST ──────────────────────────────────────────────────────
+  // Previously used Promise.all([cache, searxng]) — this always fired SearXNG
+  // even on cache hits, wasting a full network round-trip every time.
+  // Now: cache check first (mem = sync, redis = ~5ms), SearXNG only on miss.
   const cached = await procGetCacheAs<{ name: string; url: string }>(ck);
   if (cached) return cached;
 
@@ -801,92 +795,6 @@ export async function scrapeNotebookCheckProcessor(
     });
   }
 
-  // ── PAGE-TYPE GUARD + REVIEW-PAGE FALLBACK ──────────────────────────────
-  // NBC review pages embed a specs table in the article body. When the standard
-  // contenttable is absent, try to extract specs from an inline <table> whose
-  // first column header is "SKU" and whose bolded row matches the chip being reviewed.
-  const h1Text = normStr($('h1').first().text());
-  const looksLikeReview = Object.keys(rawSpecs).length === 0
-    || (Object.keys(rawSpecs).length < 4 && /review|article|news/i.test(pageUrl));
-
-  if (looksLikeReview && (h1Text.length > 80 || /review|preview|analysis/i.test(h1Text))) {
-    // Extract the chip name from the review title: "AMD Ryzen 9 9950X3D Review: ..." → "AMD Ryzen 9 9950X3D"
-    const chipNameFromTitle = h1Text.replace(/\s*[\-–:].*$/, '').replace(/\s+review\s*$/i, '').trim();
-    const chipKey = chipNameFromTitle.toLowerCase();
-
-    // Find the inline specs table (has "SKU" or "Cores" header, bolded subject row)
-    $('table').each((_, tbl) => {
-      const $tbl = $(tbl);
-      const headers: string[] = [];
-      $tbl.find('tr').first().find('th, td').each((_, th) => {
-        headers.push(normStr($(th).text()).toLowerCase());
-      });
-      // Must look like a spec comparison table
-      if (!headers.some(h => /sku|cores|threads|base\s*clock|turbo|tdp/i.test(h))) return;
-
-      // Find the bolded row that corresponds to the chip being reviewed
-      $tbl.find('tr').each((_, row) => {
-        const $row = $(row);
-        const firstCell = normStr($row.find('td, th').first().text());
-        const isBolded = $row.find('td:first-child strong, td:first-child b').length > 0
-          || $row.find('strong, b').first().text().toLowerCase().includes(chipKey.split(' ').slice(-1)[0]);
-        const cellMatchesChip = chipKey.split(' ').every(w => firstCell.toLowerCase().includes(w))
-          || (chipNameFromTitle.length > 3 && firstCell.toLowerCase().includes(chipNameFromTitle.toLowerCase().split(' ').slice(-1)[0]));
-
-        if (isBolded || cellMatchesChip) {
-          $row.find('td').each((i, td) => {
-            const header = headers[i] || '';
-            const val = normStr($(td).text()).trim();
-            if (header && val && !rawSpecs[header]) rawSpecs[header] = val;
-          });
-        }
-      });
-
-      // Also extract the header row mapping for the target chip name column
-      // (some tables have chip names as column headers and spec rows as row headers)
-      if (Object.keys(rawSpecs).length < 3) {
-        const colHeaders: string[] = [];
-        $tbl.find('tr').first().find('th, td').each((_, th) => colHeaders.push(normStr($(th).text())));
-        const chipColIdx = colHeaders.findIndex(h => h.toLowerCase().includes(chipKey.split(' ').slice(-1)[0].toLowerCase()));
-        if (chipColIdx > 0) {
-          $tbl.find('tr').each((ri, row) => {
-            if (ri === 0) return;
-            const cells = $(row).find('td, th');
-            const label = normStr(cells.eq(0).text()).replace(/:$/, '').trim();
-            const val   = normStr(cells.eq(chipColIdx).text()).trim();
-            if (label && val && !rawSpecs[label]) rawSpecs[label] = val;
-          });
-        }
-      }
-    });
-
-    // Remap review-table headers to canonical spec names
-    const headerRemap: Record<string, string> = {
-      'sku': 'Model', 'cores / threads': 'Number of Cores / Threads', 'cores/threads': 'Number of Cores / Threads',
-      'base clock': 'Base Clock', 'turbo clock': 'Boost Clock', 'boost clock': 'Boost Clock',
-      'l2 cache': 'Level 2 Cache', 'l3 cache': 'Level 3 Cache', 'tdp': 'Power Consumption (TDP = Thermal Design Power)',
-      'default socket power (ppt)': 'TDP Turbo PL2', 'launch price (sep)': 'Starting Price',
-    };
-    for (const [k, v] of Object.entries(rawSpecs)) {
-      const mapped = headerRemap[k.toLowerCase()];
-      if (mapped && !rawSpecs[mapped]) { rawSpecs[mapped] = v; delete rawSpecs[k]; }
-    }
-
-    // Override the title/name with just the chip name
-    if (chipNameFromTitle && procName && chipNameFromTitle.toLowerCase().includes(procName.toLowerCase().split(' ')[0].toLowerCase())) {
-      // procName was set from search result title which may be long; use chipNameFromTitle
-    }
-    // Mark as review-sourced so downstream knows
-    rawSpecs['__sourceType'] = 'review';
-  }
-
-  // Hard reject: if still no usable specs and it's clearly a news/article (no table at all)
-  if (Object.keys(rawSpecs).filter(k => !k.startsWith('__')).length === 0) {
-    if (h1Text.length > 80 || /review|preview|analysis|vs\b|compared/i.test(h1Text)) {
-      throw new Error(`Not a processor spec page: ${h1Text.slice(0, 80)}`);
-    }
-  }
-
   // Helper: find spec value by regex-matching its label
   function findSpec(labelRx: RegExp): string {
     for (const [k, v] of Object.entries(rawSpecs)) {
@@ -906,13 +814,8 @@ export async function scrapeNotebookCheckProcessor(
   const featuresRaw = findSpec(/^Features?/i) || '';
 
   // ── TITLE / IDENTITY ──────────────────────────────────────────────────────
-  // For review pages the h1 is a full sentence; extract just the chip name prefix
-  const rawH1 = normStr($('h1').first().text());
-  const isReviewPage = rawSpecs['__sourceType'] === 'review';
-  const rawTitle = isReviewPage
-    ? rawH1.replace(/\s*[\-–:].*$/, '').replace(/\s+review\s*$/i, '').trim()
-    : rawH1 || normStr($('title').text().split('|')[0]);
-  const rawSubtitle = isReviewPage ? '' : normStr($('h2').first().text());
+  const rawTitle = normStr($('h1').first().text()) || normStr($('title').text().split('|')[0]);
+  const rawSubtitle = normStr($('h2').first().text());
 
   // ── MANUFACTURER ─────────────────────────────────────────────────────────
   function detectManufacturer(name: string): string {
@@ -1129,8 +1032,8 @@ export async function scrapeNotebookCheckProcessor(
         totalCores += count;
         if (freqMHz > boostClockMHz) boostClockMHz = freqMHz;
         if (baseClockMHz === 0 || freqMHz < baseClockMHz) baseClockMHz = freqMHz;
-        const isPerfCore = /X[1-9]|Prime|Oryon|Lion\s*Cove|Raptor|Firestorm|Avalanche|\bBIG\b|Cortex-A[789]\d\d|\bP-Core\b|Performance/i.test(name);
-        const isEffCore  = /A5[0-9]|Skymont|Sawtooth|Icestorm|Blizzard|Efficiency|little|small|Gracemont|\bE-Core\b/i.test(name);
+        const isPerfCore = /X[1-9]|Prime|Oryon|Lion\s*Cove|Raptor|Firestorm|Avalanche|\bBIG\b|Cortex-A[789]\d\d/i.test(name);
+        const isEffCore  = /A5[0-9]|Skymont|Sawtooth|Icestorm|Blizzard|Efficiency|little|small/i.test(name);
         cpuClusters.push({ name, count, baseClockMHz: freqMHz, boostClockMHz: freqMHz, isPerformanceCore: isPerfCore, isEfficiencyCore: isEffCore });
         continue;
       }
@@ -1144,8 +1047,8 @@ export async function scrapeNotebookCheckProcessor(
           const count = parseInt(mNF[1]);
           const name  = mNF[2].trim();
           totalCores += count;
-          const isPerfCore = /X[1-9]|Lion|Cortex-A[789]\d\d|Prime|Performance|Big|Large|\bP-Core\b|Raptor/i.test(name);
-          const isEffCore  = /A5[0-9]|Skymont|Efficiency|Little|Small|Gracemont|\bE-Core\b/i.test(name);
+          const isPerfCore = /X[1-9]|Lion|Cortex-A[789]\d\d|Prime|Performance|Big|Large/i.test(name);
+          const isEffCore  = /A5[0-9]|Skymont|Efficiency|Little|Small/i.test(name);
           cpuClusters.push({ name, count, isPerformanceCore: isPerfCore, isEfficiencyCore: isEffCore });
         }
         continue;
@@ -1161,8 +1064,8 @@ export async function scrapeNotebookCheckProcessor(
         totalCores += count;
 
         // Classify core type heuristically
-        const isPerfCore = /X[1-9]|Prime|Oryon|Lion\s*Cove|Raptor|Firestorm|Avalanche|\bBIG\b|Cortex-A[789]\d\d|\bP-Core\b|Performance/i.test(name);
-        const isEffCore  = /A5[0-9]|Skymont|Sawtooth|Icestorm|Blizzard|Efficiency|little|small|Gracemont|\bE-Core\b/i.test(name);
+        const isPerfCore = /X[1-9]|Prime|Oryon|Lion\s*Cove|Raptor|Firestorm|Avalanche|\bBIG\b|Cortex-A[789]\d\d/i.test(name);
+        const isEffCore  = /A5[0-9]|Skymont|Sawtooth|Icestorm|Blizzard|Efficiency|little|small/i.test(name);
 
         // Track global clocks
         if (freqMHz > boostClockMHz) boostClockMHz = freqMHz;
@@ -1285,10 +1188,9 @@ export async function scrapeNotebookCheckProcessor(
     || gpuRaw.match(/\((\d+)[\s-]?core/i);
   if (gpuCoreM) gpu.coreCount = (gpuCoreM[1] || gpuCoreM[2]) + ' cores';
 
-  // GPU max clock — handles "@1200MHz", "(up to 1200 MHz)", "(300 - 1600 MHz)"
+  // GPU max clock — handles "@1200MHz", "( - 1200 MHz)", "(up to 1200 MHz)"
   const gpuClockM = gpuRaw.match(/@\s*([\d.]+)\s*(GHz|MHz)/i)
-    || gpuRaw.match(/\(\s*[\d.]+\s*[-–]\s*([\d.]+)\s*(GHz|MHz)\s*\)/i)   // "300 - 1600 MHz" → capture 1600
-    || gpuRaw.match(/\(\s*(?:up\s*to\s*)?([\d.]+)\s*(GHz|MHz)\s*\)/i)
+    || gpuRaw.match(/\(\s*(?:up\s*to\s*|-\s*)?([\d.]+)\s*(GHz|MHz)\s*\)/i)
     || findInBody(/GPU[^.]{0,40}@\s*([\d.]+)\s*(GHz|MHz)/i);
   if (gpuClockM) {
     const f    = parseFloat(gpuClockM[1]);
@@ -1366,8 +1268,6 @@ export async function scrapeNotebookCheckProcessor(
   // Also handles "LPDDR5-6400" format
   const memSpdSrc = memSpeedRaw || memRaw || featuresRaw;
   const memSpdM = memSpdSrc.match(/LPDDR\d+[Xx]?[-\s](\d{3,5})/i)   // "LPDDR5-6400" or "LPDDR5x 4800"
-    || memSpdSrc.match(/DDR[45][Xx]?\s+(\d{3,5})\s*(MT\/s|MHz)/i)    // "DDR5 5600 MT/s"
-    || memSpdSrc.match(/DDR[45][Xx]?[-](\d{3,5})/i)                  // "DDR5-5600"
     || memSpdSrc.match(/([\d,]+)\s*(MT\/s|Mbps|MHz)/i)
     || findInBody(/memory\s*(?:speed|frequency|clock)[:\s]+([\d,]+)\s*(MT\/s|Mbps|MHz)/i);
   if (memSpdM) {
@@ -1636,8 +1536,6 @@ export async function scrapeNotebookCheckProcessor(
       const model = normStr($row.find('td:first-child a').text()).trim()
         || normStr($row.find('td:first-child').text()).trim();
       const score = normStr($row.find('td:last-child').text()).trim();
-      // Skip percentage-comparison rows like { model: "100%", score: "86%" }
-      if (/^\d+(\.\d+)?%$/.test(model) || /^\d+(\.\d+)?%$/.test(score)) return;
       if (model && score && /\d/.test(score)) {
         deviceScores.push({ model, score });
       }
@@ -1760,11 +1658,7 @@ export async function scrapeNotebookCheckProcessor(
       if (!/notebookcheck\.net/.test(fullUrl)) return;
       if (!/\.\d{4,}\.\d+\.html/i.test(fullUrl)) return;
       if (/processor-benchmarks|soc.*benchmarks/i.test(fullUrl)) return;
-      // Only include actual device review pages, not news/articles
-      const isDeviceReview = /(smartphone|phone|tablet|laptop|notebook|desktop)[\s-]review/i.test(fullUrl);
-      const isNewsOrArticle = title.length > 80 || /\d{2}\/\d{2}\/\d{4}/.test(title)
-        || /(leak|rumor|confirm|announc|unveil|price|stock|fake|report|tip|hint|shows?\s+up|raises?|dies?|killstreak)/i.test(title);
-      if (isDeviceReview && !isNewsOrArticle) {
+      if (/(smartphone|phone|tablet|laptop)[\s-]review/i.test(fullUrl)) {
         devSeen.add(fullUrl);
         devicesUsing.push({ name: title, url: fullUrl });
       }
@@ -1795,18 +1689,6 @@ export async function scrapeNotebookCheckProcessor(
   else if (/\bupper[\s-]entry\b/i.test(tierSrc))  performanceTier = 'Upper Entry-Level';
   else if (/\bentry[\s-]level\b/i.test(tierSrc))  performanceTier = 'Entry-Level';
   else if (/\bbudget\b/i.test(tierSrc))            performanceTier = 'Budget';
-  // Desktop chip heuristics based on model name when description lacks tier keywords
-  if (!performanceTier) {
-    const n = (procName || '').toLowerCase();
-    if (/\bi9\b|\bultimate\b|\bextreme\b|\bplatinum\b|\bthreadripper\b|\bepyc\b|\bxeon\s*w/i.test(n))
-      performanceTier = 'Flagship';
-    else if (/\bi7\b|\bryzen\s*7\b|\bcore\s*ultra\s*7\b/i.test(n))
-      performanceTier = 'High-End';
-    else if (/\bi5\b|\bryzen\s*5\b|\bcore\s*ultra\s*5\b/i.test(n))
-      performanceTier = 'Mid-Range';
-    else if (/\bi3\b|\bryzen\s*3\b|\bcore\s*ultra\s*3\b|\bceleron\b|\bpentium\b|\bathlon\b/i.test(n))
-      performanceTier = 'Entry-Level';
-  }
 
   // ══════════════════════════════════════════════════════════════════════════
   //  IMAGES
@@ -1826,7 +1708,6 @@ export async function scrapeNotebookCheckProcessor(
       : 'https://www.notebookcheck.net/' + rawUrl;
     if (!/\.(jpe?g|png|webp|gif)(\?.*)?$/i.test(url)) return;
     if (!/\/fileadmin\//i.test(url)) return;
-    if (/\/_processed_\//i.test(url)) return;   // skip low-quality resized thumbnails
     if (/\/templates\/|\/awards?\/|\/png_rating\/|\/svg\//i.test(url)) return;
     if (/clear\.gif|spacer\.|pixel\.(gif|png)/i.test(url)) return;
     const key = url.toLowerCase();
@@ -1929,72 +1810,19 @@ export async function scrapeNotebookCheckProcessor(
 
 /** Full processor data: search + scrape pipeline */
 export async function getNotebookCheckProcessor(query: string): Promise<NBCProcessorData | NBCProcessorError | null> {
-  const ck  = `proc:full:${PROC_CACHE_VERSION}:${query.toLowerCase().trim()}`;
-  const nck = `proc:search:${PROC_CACHE_VERSION}:${query.toLowerCase().trim()}`;
-
-  // ── Fast path: full result already cached ────────────────────────────────
+  const ck = `proc:full:${PROC_CACHE_VERSION}:${query.toLowerCase().trim()}`;
   const cached = await procGetCacheAs<NBCProcessorData | NBCProcessorError>(ck);
   if (cached) return cached;
 
-  // ── If URL already known from a prior search/suggestions call, skip SearXNG ──
-  const searchCached = await procGetCacheAs<{ name: string; url: string }>(nck);
-  if (searchCached) {
-    // URL known — go straight to scrape (~1500ms, no search cost)
-    try {
-      const details = await scrapeNotebookCheckProcessor(searchCached.url, searchCached.name);
-      const result: NBCProcessorData = { ...details, pageFound: searchCached, reviewUrl: searchCached.url };
-      procSetCache(ck, result);
-      return result;
-    } catch (e: any) {
-      if (/not a processor spec page/i.test(e?.message ?? '')) return null;
-      const err: NBCProcessorError = { error: e?.message ?? String(e), query, code: e?.response?.status };
-      return err;
-    }
-  }
-
-  // ── Cold path: search + scrape pipelined ────────────────────────────────
-  // As soon as SearXNG returns the first high-confidence URL (score >= 3000)
-  // we immediately start scraping it in parallel — we don't wait for all
-  // search results to finish scoring. This overlaps ~800ms of search tail
-  // with the scrape fetch, shaving significant time off cold requests.
-  const oq = query.trim();
-  const nq = normalizeProcQuery(query);
-
-  // Scrape is kicked off the moment onFirstHit fires
-  let earlyScrapePage: { name: string; url: string } | null = null;
-  let earlyScrapeProm: Promise<NBCProcessorData> | null = null;
-
-  const onFirstHit = (hit: ProcessorSearchResult) => {
-    earlyScrapePage = { name: hit.title || hit.url, url: hit.url };
-    earlyScrapeProm = scrapeNotebookCheckProcessor(earlyScrapePage.url, earlyScrapePage.name);
-  };
-
-  // Fire search — onFirstHit starts scrape in parallel as results arrive
-  const results = await searchProcViaSearXNG(nq, oq, undefined, onFirstHit);
-
-  if (!results.length) return null;
-  const best = procPickBest(results);
-  if (!best) return null;
-
-  const finalPage = { name: best.title || best.url, url: best.url };
-  procSetCache(nck, finalPage);
-
-  // If the best result matches what we already started scraping — reuse that promise
-  // (avoids a second fetch). Otherwise discard and scrape the better URL.
-  const scrapeTarget = (earlyScrapePage && earlyScrapePage.url === finalPage.url && earlyScrapeProm)
-    ? { page: earlyScrapePage, prom: earlyScrapeProm }
-    : { page: finalPage, prom: scrapeNotebookCheckProcessor(finalPage.url, finalPage.name) };
+  const page = await searchProcessor(query);
+  if (!page) return null;
 
   try {
-    const details = await scrapeTarget.prom;
-    const result: NBCProcessorData = { ...details, pageFound: scrapeTarget.page, reviewUrl: scrapeTarget.page.url };
+    const details = await scrapeNotebookCheckProcessor(page.url, page.name);
+    const result: NBCProcessorData = { ...details, pageFound: { name: page.name, url: page.url }, reviewUrl: page.url };
     procSetCache(ck, result);
     return result;
   } catch (e: any) {
-    if (/not a processor spec page/i.test(e?.message ?? '')) {
-      log('debug', 'proc.wrong.page', { url: scrapeTarget.page.url, query });
-      return null;
-    }
     const err: NBCProcessorError = { error: e?.message ?? String(e), query, code: e?.response?.status };
     return err;
   }
@@ -2006,11 +1834,11 @@ export async function searchNotebookCheckProcessors(query: string): Promise<Proc
   const oq = query.trim();
   const nq = normalizeProcQuery(query);
 
-  const [cached, results] = await Promise.all([
-    procGetCacheAs<ProcessorSearchResult[]>(ck),
-    searchProcViaSearXNG(nq, oq),
-  ]);
+  // Cache first — same fix as searchProcessor()
+  const cached = await procGetCacheAs<ProcessorSearchResult[]>(ck);
   if (cached) return cached;
+
+  const results = await searchProcViaSearXNG(nq, oq);
   if (!results.length) return [];
 
   const sorted = results.sort((a, b) => b.score - a.score);
@@ -2025,41 +1853,3 @@ export async function scrapeProcessorByUrl(url: string, name?: string): Promise<
 
 /** Export cache version for external use (e.g. cache invalidation) */
 export { PROC_CACHE_VERSION };
-
-// ── WARMUP ───────────────────────────────────────────────────────────────────
-// Pre-populate search cache for the most commonly queried chips so the first
-// real user request skips SearXNG entirely and goes straight to scrape.
-const PROC_WARMUP_CHIPS = [
-  'snapdragon 8 elite',
-  'snapdragon 8 gen 3',
-  'snapdragon 8 gen 2',
-  'snapdragon 888',
-  'snapdragon 865',
-  'snapdragon 855',
-  'dimensity 9300',
-  'dimensity 9200',
-  'exynos 2400',
-  'apple a17 pro',
-  'apple a16',
-  'google tensor g3',
-  'mediatek dimensity 9400',
-  'snapdragon 7 gen 3',
-  'snapdragon 6 gen 3',
-];
-
-export async function warmProcCache(): Promise<void> {
-  // Stagger warmup to avoid hammering SearXNG at boot — 600ms apart
-  for (const chip of PROC_WARMUP_CHIPS) {
-    const ck = `proc:full:${PROC_CACHE_VERSION}:${chip}`;
-    const sk = `proc:search:${PROC_CACHE_VERSION}:${chip}`;
-    // Only warm if not already cached
-    const [fullCached, searchCached] = await Promise.all([
-      procGetCacheAs<unknown>(ck),
-      procGetCacheAs<unknown>(sk),
-    ]);
-    if (fullCached || searchCached) continue; // already warm, skip
-    // Fire search in background — don't await, don't block boot
-    searchProcessor(chip).catch(() => {});
-    await new Promise(r => setTimeout(r, 600));
-  }
-}
