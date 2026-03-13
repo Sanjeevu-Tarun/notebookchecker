@@ -825,8 +825,11 @@ app.get('/api/index/crawl-debug', async (req, res) => {
 
   const urlsToTry = [
     req.query.url as string || '',
-    'https://www.notebookcheck.net/Reviews.55.0.html?cat=Smartphones',
+    // Try the dedicated smartphone category page first
     'https://www.notebookcheck.net/Smartphones.1311.0.html',
+    // Then try page 2 of smartphones to confirm pagination works
+    'https://www.notebookcheck.net/Smartphones.1311.0.html?&ns_page=2',
+    // Fallback: mixed reviews page
     'https://www.notebookcheck.net/Reviews.55.0.html',
   ].filter(Boolean);
 
@@ -897,8 +900,32 @@ app.get('/api/index/crawl-debug', async (req, res) => {
         htmlSnippet: req.query.raw === 'true' ? html.slice(0, 3000) : undefined,
       });
 
-      // Stop after first successful URL with phone results
-      if (phoneLinks.length > 0) break;
+      // Stop after first URL that has phone results (don't test further URLs)
+      if (phoneLinks.length > 0) {
+        // Test page 2 to confirm pagination works, only for the winning URL
+        const page2Url = testUrl.includes('ns_page') ? null : `${testUrl.split('?')[0]}?&ns_page=2`;
+        if (page2Url && !testUrl.includes('ns_page=2')) {
+          try {
+            const r2 = await axios.get(page2Url, { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36' }, timeout: 8000 });
+            const $2 = cheerio.load(r2.data);
+            const p2links: string[] = [];
+            $2('a[href]').each((_: any, el: any) => {
+              let h = $2(el).attr('href') || '';
+              if (h.startsWith('/')) h = 'https://www.notebookcheck.net' + h;
+              h = h.split('?')[0];
+              if (!h.includes('notebookcheck.net') || !/\.\d{4,}\.0\.html$/.test(h)) return;
+              const s = h.split('/').pop() || '';
+              const hp = /smartphone|(?<![a-z])phone(?![a-z])|iphone/i.test(s);
+              const np = /headphone|earphone|vacuum|robot|calendar|smartwatch|tablet|laptop/i.test(s);
+              if (hp && !np) p2links.push(h);
+            });
+            (results[results.length - 1] as any).page2Check = { url: page2Url, phoneLinks: p2links.length, sample: p2links.slice(0, 3) };
+          } catch(e: any) {
+            (results[results.length - 1] as any).page2Check = { url: page2Url, error: e.message };
+          }
+        }
+        break;
+      }
 
     } catch (e: any) {
       results.push({

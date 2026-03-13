@@ -343,9 +343,8 @@ async function saveIndexToRedis(): Promise<void> {
 // We try Format A first; if it returns 0 results we fall back to Format B.
 // NBC uses ns_page= for pagination (not page=) — discovered from live response
 // The dedicated smartphone reviews category page is the correct starting point
-const NBC_REVIEWS_BASE_A = 'https://www.notebookcheck.net/Smartphones.1311.0.html';
-const NBC_REVIEWS_BASE_B = 'https://www.notebookcheck.net/Reviews.55.0.html';
-const NBC_REVIEWS_BASE   = NBC_REVIEWS_BASE_A;
+const NBC_SMARTPHONES_BASE = 'https://www.notebookcheck.net/Smartphones.1311.0.html';
+const NBC_REVIEWS_BASE_A   = 'https://www.notebookcheck.net/Reviews.55.0.html';
 
 export interface CrawlOptions {
   maxPages?:       number;   // cap at N pages (default: unlimited)
@@ -382,27 +381,28 @@ export async function crawlNBCSmartphoneIndex(opts: CrawlOptions = {}): Promise<
 
   try {
     // ── STEP 1: Fetch page 1 to determine total page count ──────────────────
-    // NBC Reviews listing — cat=Smartphones is ignored by NBC but kept for consistency
-    // Real phone filtering is done by slug pattern (smartphone|phone in URL)
-    let firstPageUrl = `${NBC_REVIEWS_BASE_A}?cat=Smartphones`;
-    let useBaseB = false;
-    log('info', 'index.fetch_page', { page: 1, url: firstPageUrl });
+    // Try the dedicated smartphone category page first (/Smartphones.1311.0.html)
+    // Fall back to the mixed Reviews page if it fails or returns no results
+    let baseUrl = NBC_SMARTPHONES_BASE;
+    let firstPageUrl = NBC_SMARTPHONES_BASE;
 
+    log('info', 'index.fetch_page', { page: 1, url: firstPageUrl });
     let firstHtml = await fetchPage(firstPageUrl);
     let page1Entries = extractReviewUrls(firstHtml);
 
-    // Fallback to direct Reviews page if needed
     if (page1Entries.length === 0) {
-      log('info', 'index.try_format_b', { reason: 'Format A returned 0 results' });
-      firstPageUrl = NBC_REVIEWS_BASE_B;
-      useBaseB = true;
+      log('info', 'index.try_reviews_fallback', { reason: 'Smartphone category page returned 0' });
+      baseUrl = NBC_REVIEWS_BASE_A;
+      firstPageUrl = NBC_REVIEWS_BASE_A;
       firstHtml = await fetchPage(firstPageUrl);
       page1Entries = extractReviewUrls(firstHtml);
     }
 
-    const maxPageCount = Math.min(detectTotalPages(firstHtml), maxPages);
-    const pagesToFetch = Math.max(maxPageCount, 1);
-    log('info', 'index.total_pages', { pagesToFetch, format: useBaseB ? 'B' : 'A', page1Count: page1Entries.length });
+    // Use blind pagination — detectTotalPages only shows the current page link (ns_page=1)
+    // on page 1. We instead keep fetching until a page returns 0 results.
+    // Cap at maxPages as a safety limit.
+    const pagesToFetch = maxPages;
+    log('info', 'index.crawl_mode', { mode: 'blind_pagination', baseUrl, page1Count: page1Entries.length });
     for (const { url, title } of page1Entries) {
       const isNew = !indexStore.has(url);
       if (isNew || forceRecrawl) {
@@ -427,7 +427,7 @@ export async function crawlNBCSmartphoneIndex(opts: CrawlOptions = {}): Promise<
     for (let page = 2; page <= pagesToFetch; page++) {
       await new Promise(r => setTimeout(r, delayMs));
 
-      const pageUrl = `${NBC_REVIEWS_BASE_A}?&ns_page=${page}`;
+      const pageUrl = `${baseUrl}?&ns_page=${page}`;
       log('info', 'index.fetch_page', { page, url: pageUrl });
 
       try {
