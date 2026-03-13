@@ -711,13 +711,12 @@ app.get('/api/index/crawl-page', async (req, res) => {
   const page = parseInt(req.query.page as string || '1');
   try {
     const result = await crawlOnePage(page);
-    // Rebuild search index every 10 pages — not every page (too expensive)
-    if (page % 10 === 0) rebuildSearchIndex().catch(() => {});
+    // Rebuild search index after every page so /api/phone searches stay fast
+    rebuildSearchIndex().catch(() => {}); // fire and forget
     return res.json({ success: true, result,
       hint: result.done ? 'No more pages — crawl complete' : `Call ?page=${result.nextPage} for next page` });
   } catch (e: any) {
-    console.error(`[crawl-page] page=${page} FAILED:`, e.message, e.stack?.slice(0, 500));
-    return res.status(500).json({ success: false, error: e.message, code: e.code, stack: e.stack?.slice(0, 800) });
+    return res.status(500).json({ success: false, error: e.message });
   }
 });
 
@@ -915,56 +914,6 @@ app.get('/api/index/library-debug', async (req, res) => {
     });
   } catch (e: any) {
     return res.status(500).json({ success: false, error: e.message, fetchMs: Date.now() - t0 });
-  }
-});
-
-
-// /api/index/crawl-step-debug — isolates exactly which step of crawlOnePage crashes
-app.get('/api/index/crawl-step-debug', async (req, res) => {
-  const page = parseInt(req.query.page as string || '1');
-  const steps: Record<string, any> = {};
-  const t0 = Date.now();
-
-  try {
-    // Step 1: fetch reviews page
-    const NBC_PHONES = 'https://www.notebookcheck.net/Smartphones.155.0.html';
-    const NBC_LIBRARY = 'https://www.notebookcheck.net/Library.279.0.html';
-    const axios2 = (await import('axios')).default;
-
-    const reviewsUrl = page === 1 ? NBC_PHONES : `${NBC_PHONES}?&ns_page=${page}`;
-    const libraryUrl = page === 1 ? NBC_LIBRARY : `${NBC_LIBRARY}?&ns_page=${page}`;
-
-    try {
-      const t1 = Date.now();
-      const r = await axios2.get(reviewsUrl, { headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 12000 });
-      steps.reviewsFetch = { ok: true, ms: Date.now() - t1, status: r.status, htmlLen: (r.data as string).length };
-    } catch (e: any) { steps.reviewsFetch = { ok: false, error: e.message, status: e.response?.status }; }
-
-    try {
-      const t1 = Date.now();
-      const r = await axios2.get(libraryUrl, { headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 12000 });
-      steps.libraryFetch = { ok: true, ms: Date.now() - t1, status: r.status, htmlLen: (r.data as string).length };
-    } catch (e: any) { steps.libraryFetch = { ok: false, error: e.message, status: e.response?.status }; }
-
-    // Step 2: Redis loadEntries
-    try {
-      const t1 = Date.now();
-      const { getQueueStats } = await import('./src/notebookcheck_index');
-      const stats = await getQueueStats();
-      steps.redisLoad = { ok: true, ms: Date.now() - t1, totalEntries: stats.total };
-    } catch (e: any) { steps.redisLoad = { ok: false, error: e.message }; }
-
-    // Step 3: full crawlOnePage
-    try {
-      const t1 = Date.now();
-      const { crawlOnePage } = await import('./src/notebookcheck_index');
-      const result = await crawlOnePage(page);
-      steps.crawlOnePage = { ok: true, ms: Date.now() - t1, result };
-    } catch (e: any) { steps.crawlOnePage = { ok: false, error: e.message, stack: e.stack?.slice(0, 400) }; }
-
-    return res.json({ success: true, page, totalMs: Date.now() - t0, steps });
-  } catch (e: any) {
-    return res.status(500).json({ success: false, error: e.message, stack: e.stack?.slice(0, 400), steps });
   }
 });
 
@@ -1189,7 +1138,7 @@ app.get('/crawler', (_, res) => {
   function setStatus(msg,active=false){const s=document.getElementById('statusBadge'),i=document.getElementById('logIndicator2');s.textContent=msg;s.style.color=active?'var(--accent)':'var(--muted)';i.innerHTML=active?'<span class="pulse"></span>':''}
   function updateStats(){document.getElementById('statPages').textContent=totalPages;document.getElementById('statUrls').textContent=totalUrls;document.getElementById('statNew').textContent=totalNew;document.getElementById('statPage').textContent=currentPage;const e=document.getElementById('statErrors');e.textContent=errors;e.className='stat-value '+(errors>0?'danger':'muted');document.getElementById('statPages').className='stat-value '+(totalPages>0?'':'muted');document.getElementById('statUrls').className='stat-value '+(totalUrls>0?'':'muted')}
   async function unlock(){log('Unlocking...','warn');try{const r=await fetch('/api/debug/redis-force-unlock'),d=await r.json();log(d.hint?.includes('✅')?'✅ Lock cleared':'Lock: '+JSON.stringify(d),d.hint?.includes('✅')?'ok':'warn')}catch(e){log('Unlock failed: '+e.message,'err')}}
-  async function startCrawl(){if(running)return;running=true;stopRequested=false;startTime=Date.now();currentPage=1;document.getElementById('btnStart').disabled=true;document.getElementById('btnStop').style.display='inline-block';setStatus('Crawling...',true);elapsedTimer=setInterval(()=>{const s=Math.round((Date.now()-startTime)/1000);document.getElementById('statElapsed').textContent=s+'s';document.getElementById('statElapsed').className='stat-value'},1000);try{await fetch('/api/debug/redis-force-unlock');log('🔓 Lock cleared','ok')}catch{}log('Starting crawl...','info');while(!stopRequested){try{document.getElementById('cardPages').classList.add('active');const resp=await fetch(\`/api/index/crawl-page?page=\${currentPage}\`);if(!resp.ok){let em=`HTTP ${resp.status}`;try{const ed=await resp.clone().json();em+=': '+(ed.error||'').slice(0,100);}catch{}log(`Page ${currentPage} ${em}`,'err');errors++;updateStats();await new Promise(r=>setTimeout(r,2000));currentPage++;continue}const data=await resp.json();if(!data.success){log(\`Page \${currentPage}: \${data.error||'error'}\`,'err');errors++;updateStats();await new Promise(r=>setTimeout(r,2000));currentPage++;continue}const result=data.result;totalPages++;totalUrls=result.totalUrls;totalNew+=result.newUrls;updateStats();const pct=Math.min(Math.round(currentPage/150*100),99);document.getElementById('progressFill').style.width=pct+'%';document.getElementById('progressPct').textContent=pct+'%';document.getElementById('progressLabel').textContent=\`Page \${currentPage} crawled\`;log(\`Page \${currentPage} → \${result.phonesFound} phones, \${result.newUrls} new (total: \${result.totalUrls})\`,result.newUrls>0?'ok':'info');if(result.done){log(\`🎉 Done! \${totalUrls} URLs indexed across \${totalPages} pages.\`,'done');document.getElementById('progressFill').style.width='100%';document.getElementById('progressPct').textContent='100%';document.getElementById('progressLabel').textContent='Crawl complete!';break}currentPage++;await new Promise(r=>setTimeout(r,800))}catch(e){log(\`Page \${currentPage} failed: \${e.message}\`,'err');errors++;updateStats();await new Promise(r=>setTimeout(r,3000));currentPage++}}if(stopRequested)log(\`⏹ Stopped at page \${currentPage}. \${totalUrls} URLs so far.\`,'warn');running=false;clearInterval(elapsedTimer);document.getElementById('btnStart').disabled=false;document.getElementById('btnStart').textContent='▶ Resume';document.getElementById('btnStop').style.display='none';document.getElementById('cardPages').classList.remove('active');setStatus('Done',false)}
+  async function startCrawl(){if(running)return;running=true;stopRequested=false;startTime=Date.now();currentPage=1;document.getElementById('btnStart').disabled=true;document.getElementById('btnStop').style.display='inline-block';setStatus('Crawling...',true);elapsedTimer=setInterval(()=>{const s=Math.round((Date.now()-startTime)/1000);document.getElementById('statElapsed').textContent=s+'s';document.getElementById('statElapsed').className='stat-value'},1000);try{await fetch('/api/debug/redis-force-unlock');log('🔓 Lock cleared','ok')}catch{}log('Starting crawl...','info');while(!stopRequested){try{document.getElementById('cardPages').classList.add('active');const resp=await fetch(\`/api/index/crawl-page?page=\${currentPage}\`);if(!resp.ok){log(\`Page \${currentPage} HTTP \${resp.status}\`,'err');errors++;updateStats();await new Promise(r=>setTimeout(r,2000));currentPage++;continue}const data=await resp.json();if(!data.success){log(\`Page \${currentPage}: \${data.error||'error'}\`,'err');errors++;updateStats();await new Promise(r=>setTimeout(r,2000));currentPage++;continue}const result=data.result;totalPages++;totalUrls=result.totalUrls;totalNew+=result.newUrls;updateStats();const pct=Math.min(Math.round(currentPage/150*100),99);document.getElementById('progressFill').style.width=pct+'%';document.getElementById('progressPct').textContent=pct+'%';document.getElementById('progressLabel').textContent=\`Page \${currentPage} crawled\`;log(\`Page \${currentPage} → \${result.phonesFound} phones, \${result.newUrls} new (total: \${result.totalUrls})\`,result.newUrls>0?'ok':'info');if(result.done){log(\`🎉 Done! \${totalUrls} URLs indexed across \${totalPages} pages.\`,'done');document.getElementById('progressFill').style.width='100%';document.getElementById('progressPct').textContent='100%';document.getElementById('progressLabel').textContent='Crawl complete!';break}currentPage++;await new Promise(r=>setTimeout(r,800))}catch(e){log(\`Page \${currentPage} failed: \${e.message}\`,'err');errors++;updateStats();await new Promise(r=>setTimeout(r,3000));currentPage++}}if(stopRequested)log(\`⏹ Stopped at page \${currentPage}. \${totalUrls} URLs so far.\`,'warn');running=false;clearInterval(elapsedTimer);document.getElementById('btnStart').disabled=false;document.getElementById('btnStart').textContent='▶ Resume';document.getElementById('btnStop').style.display='none';document.getElementById('cardPages').classList.remove('active');setStatus('Done',false)}
   function stopCrawl(){stopRequested=true;setStatus('Stopping...',false);log('Stop requested...','warn')}
 </script>
 </body>
