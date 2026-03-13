@@ -406,25 +406,13 @@ export async function rebuildSearchIndex(): Promise<void> {
   await rSetPermanent(SEARCH_INDEX_KEY, flat);
 }
 
-// Strip the stored snippet from the title — index stores "88% Clean Title...snippet text"
-// We only want to match against the clean review title, not the preview blurb
+// Normalise the stored title for matching.
+// Index titles from the Chronological crawl are already clean: "Vivo X300 Pro", "Samsung Galaxy S26 Ultra".
+// We just lowercase and trim. The old snippet-stripping logic was for SearXNG result titles
+// which are no longer stored here.
 function cleanIndexTitle(raw: string): string {
-  // Remove leading rating like "88% "
-  let t = raw.replace(/^\d+%\s*/, '');
-  // The clean title ends at the first occurrence of the subtitle/snippet separator
-  // Titles look like: "Samsung Galaxy S25 Ultra review - The AI phone...SubtitleText"
-  // Snippets are appended directly after the title with no separator in some entries
-  // Safest: take only up to the first sentence end or 120 chars of the first segment
-  // Split on common title-end patterns: " review" boundary or truncate after ~100 chars of title
-  const reviewIdx = t.search(/\breview\b/i);
-  if (reviewIdx !== -1) {
-    // Include "review" and a few chars after (e.g. " review - subtitle") but cut the snippet
-    const dashIdx = t.indexOf(' - ', reviewIdx);
-    t = dashIdx !== -1 ? t.slice(0, dashIdx) : t.slice(0, reviewIdx + 10);
-  } else {
-    t = t.slice(0, 120);
-  }
-  return t.toLowerCase().trim();
+  // Strip a leading score like "88% " if somehow present (legacy entries)
+  return raw.replace(/^\d+%\s*/, '').toLowerCase().trim();
 }
 
 // Pre-compiled word boundary regex cache: avoids re-compiling the same regex
@@ -439,32 +427,37 @@ function wordBoundaryRe(word: string): RegExp {
   return re;
 }
 
-// Same scoring as GSMArena resolver — all words must match, variant penalty system
+// Score an index entry title against a user query.
+// Titles in the index are clean: "Vivo X300 Pro", "Samsung Galaxy S26 Ultra".
+// Rules:
+//   1. ALL query words must appear in the title (hard reject if any missing)
+//   2. Exact match → 10000, title-contains-query → 8000
+//   3. Each variant word in the title that the query DIDN'T ask for → -2000 penalty
+//      (e.g. query "vivo x300" vs title "Vivo X300 Pro" → penalised but still wins
+//       if no other entry scores higher AND the post-search hard-reject doesn't fire)
+//   4. Shorter title = small length bonus (more precise match)
 function scoreIndexMatch(entryTitle: string, query: string): number {
-  // Score only against the clean title, NOT the snippet (which may contain false word matches)
   const d = cleanIndexTitle(entryTitle);
   const q = query.toLowerCase().trim();
   const qWords = q.split(/\s+/).filter((w: string) => w.length > 1);
 
-  // ALL query words must appear as whole words in the clean title — hard reject otherwise
-  // Use word boundary check: " word " or start/end — prevents "ultra" matching "ultra-slim"
   const wordIn = (word: string, text: string) => wordBoundaryRe(word).test(text);
 
+  // Hard reject: any query word missing from the title
   if (!qWords.every((w: string) => wordIn(w, d))) return -1;
 
-  // Exact or substring match
+  // Exact or contains match — highest confidence
   if (d === q) return 10000;
   if (d.includes(q)) return 8000;
 
-  // Penalise entries that have variant words the query didn't ask for
-  const variants = ['ultra', 'pro', 'plus', 'mini', 'lite', 'fe', 'max', 'edge', 'standard', 'turbo', 'fold', 'flip', 'xl', 'xr', 'se', '5g', '4g'];
-  const lastQWord = qWords[qWords.length - 1];
+  // Penalise extra variant words in title that query didn't include
+  const variants = ['ultra', 'pro', 'plus', 'mini', 'lite', 'fe', 'max', 'edge', 'standard', 'turbo', 'fold', 'flip', 'xl', 'xr', 'se', '5g', '4g', 'go', 'slim', 'zoom', 'compact'];
   let penalty = 0;
   for (const v of variants) {
-    if (v !== lastQWord && wordIn(v, d) && !q.includes(v)) penalty += 2000;
+    if (wordIn(v, d) && !wordIn(v, q)) penalty += 2000;
   }
 
-  // Bonus for shorter title (fewer extra words = more precise match)
+  // Bonus for shorter title (fewer extra words = closer match)
   const lengthBonus = Math.max(0, 500 - d.length * 5);
 
   return 5000 - penalty + lengthBonus;
@@ -496,24 +489,19 @@ export async function searchIndex(q: string): Promise<{ url: string; title: stri
     }
   }
 
-  // Require a confident match — penalised scores (e.g. wrong variant) must not win.
-  // Base threshold: 3000. A clean full-word match scores 5000+; a variant-penalised
-  // match scores 3000 or less and should fall through to SearXNG.
-  const MIN_SCORE = 3500;
-  if (bestScore < MIN_SCORE || !best) return null;
+  // Reject if no entry scored above -1 (no word-match at all)
+  if (bestScore < 0 || !best) return null;
 
-  // Hard-reject: if the query contains NO variant suffix but the winning entry does,
-  // the user asked for a base model that isn't in the index — don't return a wrong variant.
+  // Hard-reject: title has a variant suffix the query didn't ask for.
+  // e.g. query "vivo x300" must NOT return "Vivo X300 Pro" — that's a different device.
+  // e.g. query "vivo x300 pro" → title "Vivo X300 Pro" has no extra variant → allowed.
   const VARIANT_SUFFIXES = ['ultra', 'pro', 'plus', 'mini', 'lite', 'fe', 'max', 'edge',
-    'standard', 'turbo', 'fold', 'flip', 'xl', 'xr', 'se', '5g', '4g'];
-  const queryHasVariant = VARIANT_SUFFIXES.some(v => wordBoundaryRe(v).test(normalized));
-  if (!queryHasVariant) {
-    const cleanBestTitle = cleanIndexTitle(best.title).toLowerCase();
-    const titleHasExtraVariant = VARIANT_SUFFIXES.some(
-      v => wordBoundaryRe(v).test(cleanBestTitle) && !wordBoundaryRe(v).test(normalized)
-    );
-    if (titleHasExtraVariant) return null; // let SearXNG handle it
-  }
+    'standard', 'turbo', 'fold', 'flip', 'xl', 'xr', 'se', '5g', '4g', 'go', 'slim', 'zoom', 'compact'];
+  const cleanBestTitle = cleanIndexTitle(best.title);
+  const titleHasExtraVariant = VARIANT_SUFFIXES.some(
+    v => wordBoundaryRe(v).test(cleanBestTitle) && !wordBoundaryRe(v).test(normalized)
+  );
+  if (titleHasExtraVariant) return null; // wrong variant — let SearXNG handle it
 
   return best;
 }
