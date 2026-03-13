@@ -16,8 +16,6 @@ import {
 import {
   crawlSync,
   crawlOnePage,
-  crawlReviewsPage,
-  crawlChronoPage,
   getQueueStats,
   getIndexEntries,
   scrapeIndexedDevice,
@@ -712,30 +710,6 @@ app.get('/api/index/crawl', async (req, res) => {
   }
 });
 
-// /api/index/crawl-reviews-page — crawl one page of NBC Smartphones review listing (Source A)
-app.get('/api/index/crawl-reviews-page', async (req, res) => {
-  const page = parseInt(req.query.page as string || '1');
-  try {
-    const result = await crawlReviewsPage(page);
-    rebuildSearchIndex().catch(() => {});
-    return res.json({ success: true, result });
-  } catch (e: any) {
-    return res.status(500).json({ success: false, error: e.message });
-  }
-});
-
-// /api/index/crawl-chrono-page — crawl one page of Chronological listing (Source B, library fallback)
-app.get('/api/index/crawl-chrono-page', async (req, res) => {
-  const page = parseInt(req.query.page as string || '1');
-  try {
-    const result = await crawlChronoPage(page);
-    rebuildSearchIndex().catch(() => {});
-    return res.json({ success: true, result });
-  } catch (e: any) {
-    return res.status(500).json({ success: false, error: e.message });
-  }
-});
-
 // /api/index/crawl-page — crawl exactly one page (for client-chaining or cron)
 // ?page=1
 app.get('/api/index/crawl-page', async (req, res) => {
@@ -1044,173 +1018,143 @@ app.get('/recover', (req, res) => {
 <html>
 <head>
   <meta charset="utf-8">
-  <title>NBC Full Re-crawl</title>
+  <title>NBC Recovery — Full Re-crawl</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: monospace; background: #0d1117; color: #e6edf3; padding: 24px; }
-    h1 { font-size: 18px; margin-bottom: 4px; }
+    h1 { font-size: 18px; color: #f85149; margin-bottom: 6px; }
     .subtitle { font-size: 12px; color: #8b949e; margin-bottom: 20px; }
-    #status { font-size: 13px; color: #8b949e; margin-bottom: 14px; }
-    #bar-wrap { background: #161b22; border-radius: 6px; overflow: hidden; height: 20px; margin-bottom: 20px; }
-    #bar { height: 100%; width: 0%; transition: width 0.3s ease; }
-    #bar.reviews { background: #238636; }
-    #bar.chrono  { background: #1f6feb; }
-    #stats { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-bottom: 20px; }
-    .stat { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 12px; text-align: center; }
-    .stat .val { font-size: 24px; font-weight: bold; }
-    .stat .lbl { font-size: 10px; color: #8b949e; margin-top: 3px; }
-    .green { color: #3fb950; } .blue { color: #58a6ff; } .yellow { color: #d29922; } .red { color: #f85149; }
-    #log { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 10px;
+    #status { font-size: 13px; color: #8b949e; margin-bottom: 16px; }
+    #bar-wrap { background: #161b22; border-radius: 6px; overflow: hidden; height: 22px; margin-bottom: 20px; }
+    #bar { height: 100%; background: #1f6feb; width: 0%; transition: width 0.4s ease; }
+    #stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 20px; }
+    .stat { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 14px; text-align: center; }
+    .stat .val { font-size: 28px; font-weight: bold; color: #58a6ff; }
+    .stat .lbl { font-size: 11px; color: #8b949e; margin-top: 4px; }
+    #v-recovered .val { color: #3fb950; }
+    #log { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 12px;
            height: 300px; overflow-y: auto; font-size: 11px; line-height: 1.7; }
-    .ll { color: #8b949e; } .lok { color: #3fb950; } .ldone { color: #58a6ff; font-weight: bold; }
-    .lwarn { color: #d29922; } .lerr { color: #f85149; }
-    .phase { display: inline-block; padding: 1px 7px; border-radius: 3px; font-size: 10px; font-weight: bold; margin-right: 5px; }
-    .pa { background: #1f3a1f; color: #3fb950; }
-    .pb { background: #1a2a3a; color: #58a6ff; }
-    .pp { background: #3a1f1f; color: #f85149; }
-    .pd { background: #2a2a1a; color: #d29922; }
-    .buttons { display: flex; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
-    button { padding: 8px 18px; border: none; border-radius: 6px; cursor: pointer; font-size: 12px; font-family: monospace; }
-    #btn-all   { background: #f85149; color: #fff; }
-    #btn-rev   { background: #238636; color: #fff; }
-    #btn-lib   { background: #1f6feb; color: #fff; }
-    #btn-purge { background: #6e40c9; color: #fff; }
-    button:disabled { background: #30363d !important; color: #8b949e; cursor: not-allowed; }
-    #done-banner { display: none; margin-top: 14px; padding: 12px; background: #0d2942;
-                   border: 1px solid #1f6feb; border-radius: 6px; color: #58a6ff; text-align: center; }
+    .log-line      { color: #8b949e; }
+    .log-line.ok   { color: #3fb950; }
+    .log-line.done { color: #58a6ff; font-weight: bold; }
+    .log-line.warn { color: #d29922; }
+    .log-line.err  { color: #f85149; }
+    #btn { margin-top: 16px; padding: 9px 22px; background: #f85149; color: #fff;
+           border: none; border-radius: 6px; cursor: pointer; font-size: 13px; font-family: monospace; }
+    #btn:disabled { background: #30363d; color: #8b949e; cursor: not-allowed; }
+    #done-banner { display: none; margin-top: 16px; padding: 14px; background: #0d2942;
+                   border: 1px solid #1f6feb; border-radius: 6px; color: #58a6ff; font-size: 14px; text-align: center; }
+    .phase { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: bold; margin-right: 6px; }
+    .phase-crawl  { background: #1a2a3a; color: #58a6ff; }
+    .phase-purge  { background: #3a1f1f; color: #f85149; }
+    .phase-done   { background: #1f3a1f; color: #3fb950; }
   </style>
 </head>
 <body>
-  <h1>🔄 NBC Full Re-crawl Dashboard</h1>
-  <p class="subtitle">Source A: NBC Smartphone Reviews (~80 pages, internal reviews) &nbsp;|&nbsp; Source B: Chronological (~150 pages, library fallback)</p>
-  <div id="status">Choose an action below.</div>
-  <div id="bar-wrap"><div id="bar" class="reviews"></div></div>
+  <h1>🚨 NBC Recovery — Full Re-crawl + Purge</h1>
+  <p class="subtitle">Re-crawls all Chronological pages → resolves library URLs to review URLs (from cache, fast) → purges dupes</p>
+  <div id="status">Press Start. Resolve cache is still alive — crawl will be fast (no live NBC fetches).</div>
+  <div id="bar-wrap"><div id="bar"></div></div>
 
   <div id="stats">
-    <div class="stat"><div class="val blue"  id="v-page">—</div><div class="lbl">Current Page</div></div>
-    <div class="stat"><div class="val green" id="v-total">—</div><div class="lbl">Total in Index</div></div>
-    <div class="stat"><div class="val green" id="v-new">—</div><div class="lbl">Added This Run</div></div>
-    <div class="stat"><div class="val yellow"id="v-found">—</div><div class="lbl">Found Per Page</div></div>
-    <div class="stat"><div class="val red"   id="v-purged">—</div><div class="lbl">Dupes Purged</div></div>
+    <div class="stat"><div class="val" id="v-page">—</div><div class="lbl">Page</div></div>
+    <div class="stat"><div class="val" id="v-total">—</div><div class="lbl">Total in Index</div></div>
+    <div class="stat"><div class="val" id="v-new">—</div><div class="lbl">Re-added ✅</div></div>
+    <div class="stat"><div class="val" id="v-purged">—</div><div class="lbl">Dupes Purged 🗑</div></div>
   </div>
 
   <div id="log"></div>
-
-  <div class="buttons">
-    <button id="btn-all"   onclick="runAll()">🚀 Full Re-crawl (A + B + Purge)</button>
-    <button id="btn-rev"   onclick="runSource('reviews')">🟢 Source A Only (Reviews)</button>
-    <button id="btn-lib"   onclick="runSource('chrono')">🔵 Source B Only (Library)</button>
-    <button id="btn-purge" onclick="runPurge()">🗑 Purge Dupes Only</button>
-  </div>
-  <div id="done-banner" id="done-banner">✅ Done! Index rebuilt and clean.</div>
+  <button id="btn" onclick="start()">▶ Start Recovery Re-crawl</button>
+  <div id="done-banner">✅ Recovery complete! All internal review URLs restored. Index is clean.</div>
 
 <script>
   let running = false;
   let totalNew = 0;
 
-  function log(msg, cls = 'll') {
+  function log(msg, cls = '') {
     const el = document.getElementById('log');
     const d = document.createElement('div');
-    d.className = cls;
+    d.className = 'log-line ' + cls;
     d.innerHTML = '[' + new Date().toLocaleTimeString() + '] ' + msg;
     el.appendChild(d);
     el.scrollTop = el.scrollHeight;
   }
-  function setStatus(s) { document.getElementById('status').textContent = s; }
-  function setBtns(disabled) {
-    ['btn-all','btn-rev','btn-lib','btn-purge'].forEach(id => document.getElementById(id).disabled = disabled);
-  }
-  function setBar(pct, cls) {
-    const b = document.getElementById('bar');
-    b.className = cls;
-    b.style.width = Math.min(pct, 100) + '%';
+
+  function setStatus(msg) { document.getElementById('status').textContent = msg; }
+
+  async function crawlPage(page) {
+    const r = await fetch('/api/index/crawl-page?page=' + page).then(r => r.json());
+    if (!r.success) throw new Error(r.result?.error || 'crawl-page failed');
+    return r.result;
   }
 
-  async function crawlAllPages(endpoint, label, phaseClass, estPages) {
-    let page = 1; totalNew = 0;
-    while (true) {
-      setStatus(label + ' — page ' + page + '…');
-      const r = await fetch(endpoint + '?page=' + page).then(r => r.json());
-      if (!r.success) throw new Error(r.error || endpoint + ' failed');
-      const res = r.result;
-      totalNew += (res.newUrls || 0);
-      document.getElementById('v-page').textContent  = res.page;
-      document.getElementById('v-total').textContent = res.totalUrls;
-      document.getElementById('v-new').textContent   = totalNew;
-      document.getElementById('v-found').textContent = res.phonesFound;
-      setBar((page / estPages) * 100, phaseClass);
-      log('<span class="phase ' + phaseClass + '">' + label + '</span> p' + res.page +
-          ' — ' + res.phonesFound + ' phones, ' + res.newUrls + ' new (total: ' + res.totalUrls + ')',
-          res.newUrls > 0 ? 'lok' : 'll');
-      if (res.done) break;
-      page = res.nextPage;
-      await new Promise(r => setTimeout(r, 700));
-    }
-    log('<span class="phase ' + phaseClass + '">' + label + '</span> ✅ Complete — ' + totalNew + ' entries added.', 'lok');
-  }
-
-  async function runPurge() {
-    log('<span class="phase pp">PURGE</span> Purging library duplicates and junk titles…');
-    const pr = await fetch('/api/index/purge-library-duplicates').then(r => r.json());
-    if (!pr.success) throw new Error(pr.error);
-    document.getElementById('v-purged').textContent = pr.purged;
-    log('<span class="phase pp">PURGE</span> 🗑 Purged ' + pr.purged +
-        ' (' + pr.reasons.libraryDuplicate + ' lib dupes, ' + pr.reasons.junkTitle + ' junk). ' +
-        pr.kept + ' clean entries remain.', 'lok');
-    return pr;
-  }
-
-  async function runSource(src) {
+  async function start() {
     if (running) return;
-    running = true; setBtns(true);
+    running = true;
+    document.getElementById('btn').disabled = true;
+    document.getElementById('btn').textContent = '⏳ Re-crawling…';
+    log('<span class="phase phase-crawl">CRAWL</span> Starting re-crawl from page 1…');
+
     try {
-      if (src === 'reviews') {
-        await crawlAllPages('/api/index/crawl-reviews-page', 'SOURCE A', 'pa', 80);
-      } else {
-        await crawlAllPages('/api/index/crawl-chrono-page', 'SOURCE B', 'pb', 150);
+      let page = 1;
+      let maxPages = 300; // safety ceiling
+
+      while (page <= maxPages) {
+        setStatus('Step 1/2 — Crawling page ' + page + '…');
+        const r = await crawlPage(page);
+
+        totalNew += (r.newUrls || 0);
+        document.getElementById('v-page').textContent    = r.page;
+        document.getElementById('v-total').textContent   = r.totalUrls;
+        document.getElementById('v-new').textContent     = totalNew;
+
+        // Rough progress — NBC Chronological has ~150 pages
+        const pct = Math.min((page / 150) * 100, 99).toFixed(0);
+        document.getElementById('bar').style.width = pct + '%';
+
+        log('<span class="phase phase-crawl">CRAWL</span> Page ' + r.page +
+            ' — ' + r.phonesFound + ' phones found, ' + r.newUrls + ' re-added' +
+            ' (total: ' + r.totalUrls + ')', r.newUrls > 0 ? 'ok' : '');
+
+        if (r.done) {
+          log('<span class="phase phase-crawl">CRAWL</span> All pages done. ' + totalNew + ' entries re-added total.', 'ok');
+          break;
+        }
+
+        page = r.nextPage;
+        await new Promise(res => setTimeout(res, 800));
       }
-      setStatus('✅ Done');
+
+      // ── Purge library dupes now that review URLs are back ─────────────────
+      setStatus('Step 2/2 — Purging library duplicates…');
+      log('<span class="phase phase-purge">PURGE</span> Removing library URLs that now have a review URL…');
+      document.getElementById('bar').style.width = '100%';
+
+      const pr = await fetch('/api/index/purge-library-duplicates').then(r => r.json());
+      if (!pr.success) throw new Error(pr.error);
+
+      document.getElementById('v-purged').textContent = pr.purged;
+      log('<span class="phase phase-purge">PURGE</span> Purged ' + pr.purged +
+          ' dupes (' + pr.reasons.libraryDuplicate + ' library, ' + pr.reasons.junkTitle + ' junk). ' +
+          pr.kept + ' clean entries remain.', 'ok');
+
+      // ── Done ──────────────────────────────────────────────────────────────
+      setStatus('✅ Done — ' + pr.kept + ' clean entries in index');
+      log('<span class="phase phase-done">DONE</span> Recovery complete. Only review URLs + unreviewed library phones remain.', 'done');
       document.getElementById('done-banner').style.display = 'block';
+      document.getElementById('btn').textContent = '✅ Done';
+
     } catch(e) {
-      log('❌ ' + e.message, 'lerr'); setStatus('Error');
+      log('❌ Error: ' + e.message, 'err');
+      setStatus('Error — check log above');
+      document.getElementById('btn').disabled = false;
+      document.getElementById('btn').textContent = '▶ Retry';
+      running = false;
     }
-    setBtns(false); running = false;
-  }
-
-  async function runAll() {
-    if (running) return;
-    running = true; setBtns(true);
-    document.getElementById('done-banner').style.display = 'none';
-    log('<span class="phase pd">CLEAR</span> Clearing existing index…');
-    try {
-      // Clear index first
-      const cl = await fetch('/api/index/clear?confirm=yes').then(r => r.json());
-      log('<span class="phase pd">CLEAR</span> Index cleared. Starting fresh.', 'lwarn');
-
-      // Phase 1: Reviews
-      log('<span class="phase pa">SOURCE A</span> Crawling NBC Smartphone Reviews (~80 pages)…');
-      await crawlAllPages('/api/index/crawl-reviews-page', 'SOURCE A', 'pa', 80);
-
-      // Phase 2: Library
-      log('<span class="phase pb">SOURCE B</span> Crawling Chronological library (~150 pages, skipping duplicates)…');
-      await crawlAllPages('/api/index/crawl-chrono-page', 'SOURCE B', 'pb', 150);
-
-      // Phase 3: Purge any remaining dupes
-      setBar(100, 'reviews');
-      await runPurge();
-
-      setStatus('✅ Done — index fully rebuilt');
-      log('<span class="phase pa">DONE</span> 🎉 Full re-crawl complete. Index is clean.', 'ldone');
-      document.getElementById('done-banner').style.display = 'block';
-    } catch(e) {
-      log('❌ ' + e.message, 'lerr');
-      setStatus('Error — check log');
-    }
-    setBtns(false); running = false;
   }
 </script>
 </body>
-</html>\`);
+</html>`);
 });
 
 // /api/index/brands — brand coverage
@@ -1243,7 +1187,88 @@ app.get('/api/index/clear', async (req, res) => {
   }
 });
 
+// /api/index/library-debug — verify NBC library URL works and finds phone aggregator pages
+app.get('/api/index/library-debug', async (req, res) => {
+  const page = parseInt(req.query.page as string || '1');
+  const t0 = Date.now();
+  try {
+    const axios2 = (await import('axios')).default;
+    const { extractPhoneUrls } = await import('./src/notebookcheck_index');
+    const LIBRARY_BASE = 'https://www.notebookcheck.net/Library.279.0.html';
+    const url = page === 1 ? LIBRARY_BASE : `${LIBRARY_BASE}?&ns_page=${page}`;
+    const resp = await axios2.get(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36' },
+      timeout: 12000,
+    });
+    const html = typeof resp.data === 'string' ? resp.data : JSON.stringify(resp.data);
+    const phones = extractPhoneUrls(html);
+    // Look specifically for aggregator-style URLs (no -review in slug)
+    const aggregatorUrls = phones.filter(p => !/-review\.\d+\.0\.html$/i.test(p.url));
+    const reviewUrls     = phones.filter(p =>  /-review\.\d+\.0\.html$/i.test(p.url));
+    // Show what was filtered out as tablets/laptops for verification
+    const cheerio2 = await import('cheerio');
+    const $ = cheerio2.load(html);
+    const allSlugs: string[] = [];
+    $('a[href]').each((_: any, el: any) => {
+      const href = ($(el).attr('href') || '').split('?')[0];
+      if (href.includes('notebookcheck.net') && /\.\d{4,}\.0\.html$/.test(href)) {
+        allSlugs.push(href.split('/').pop() || '');
+      }
+    });
+    const tabletSlugs = allSlugs.filter(s => /[-_]pad[-_.0]|[-_]tab[-_.0]|ipad|galaxy[-_]tab|matepad|mediapad|magicpad/i.test(s));
+    const seriesSlugs = allSlugs.filter(s => /-Series\./i.test(s));
+    return res.json({
+      success: phones.length > 0,
+      page, url, fetchMs: Date.now() - t0,
+      htmlLength: html.length, httpStatus: resp.status,
+      total: phones.length,
+      aggregatorPages: aggregatorUrls.length,
+      reviewPages: reviewUrls.length,
+      tabletsFiltered: tabletSlugs.length,
+      seriesFiltered: seriesSlugs.length,
+      sampleAggregator: aggregatorUrls.slice(0, 5).map((p: any) => ({ url: p.url, title: p.title.slice(0, 80) })),
+      sampleReviews:    reviewUrls.slice(0, 3).map((p: any) => ({ url: p.url, title: p.title.slice(0, 80) })),
+      sampleTabletsFiltered: tabletSlugs.slice(0, 3),
+      sampleSeriesFiltered: seriesSlugs.slice(0, 3),
+    });
+  } catch (e: any) {
+    return res.status(500).json({ success: false, error: e.message, fetchMs: Date.now() - t0 });
+  }
+});
 
+// /api/index/crawl-debug — test connectivity + phone link detection
+app.get('/api/index/crawl-debug', async (req, res) => {
+  const axios2 = (await import('axios')).default;
+  const cheerio2 = await import('cheerio');
+  const testUrl = (req.query.url as string) || 'https://www.notebookcheck.net/Smartphones.155.0.html';
+  const t0 = Date.now();
+  try {
+    const resp = await axios2.get(testUrl, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        Referer: 'https://www.notebookcheck.net/' }, timeout: 12000 });
+    const html = typeof resp.data === 'string' ? resp.data : JSON.stringify(resp.data);
+    const phoneLinks = extractPhoneUrls(html);
+
+    // Check page 2
+    let page2: any = null;
+    try {
+      const r2 = await axios2.get(`${testUrl.split('?')[0]}?&ns_page=2`, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36' }, timeout: 8000 });
+      const pl2 = extractPhoneUrls(typeof r2.data === 'string' ? r2.data : JSON.stringify(r2.data));
+      page2 = { phoneLinks: pl2.length, sample: pl2.slice(0, 3).map(p => p.url) };
+    } catch (e2: any) { page2 = { error: e2.message }; }
+
+    return res.json({
+      success: phoneLinks.length > 0,
+      diagnosis: phoneLinks.length > 0 ? `Found ${phoneLinks.length} phone links on page 1` : 'No phone links found',
+      page1: { url: testUrl, status: 200, fetchMs: Date.now() - t0, htmlLength: html.length, phoneLinks: phoneLinks.length,
+        sample: phoneLinks.slice(0, 5).map(p => p.url) },
+      page2,
+    });
+  } catch (e: any) {
+    return res.status(500).json({ success: false, error: e.message, fetchMs: Date.now() - t0 });
+  }
+});
 
 // /api/debug/redis — check Redis connectivity and env vars
 app.get('/api/debug/redis', async (req, res) => {
