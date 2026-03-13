@@ -635,7 +635,9 @@ app.get('/api/index/crawl', async (req, res) => {
   const delayMs   = parseInt(req.query.delayMs as string || '600');
   const force     = req.query.force === 'true';
 
-  if (force && startPage === 1) await resetCrawlLock();
+  // Always reset the lock before starting so stale locks never block crawls.
+  // The lock is re-acquired inside crawlSync per batch with an appropriate TTL.
+  if (force || startPage === 1) await resetCrawlLock();
 
   try {
     const stats = await crawlSync(startPage, maxPages, delayMs);

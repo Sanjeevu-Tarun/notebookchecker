@@ -183,9 +183,11 @@ export function extractPhoneUrls(html: string): Array<{ url: string; title: stri
     const slug = href.split('/').pop() || '';
     if (/^(Reviews|Smartphones|Search|Topics|RSS|index|Notebooks|News)\./i.test(slug)) return;
 
-    const hasPhone  = /smartphone|iphone|(?<![a-z])phone(?![a-z])/i.test(slug);
-    const notAPhone = /headphone|earphone|microphone|vacuum|robot|calendar|smartwatch|tablet|laptop|notebook|macbook|chromebook|charger|powerbank|earbuds|speaker/i.test(slug);
-    if (!hasPhone || notAPhone) return;
+    const hasPhone  = /smartphone|iphone|(?<![a-z])phone(?![a-z])|mobile|handset/i.test(slug);
+    // Also accept URLs that are clearly phone brand + model patterns even without "phone" keyword
+    const looksLikePhoneModel = /^(apple|samsung|google|oneplus|xiaomi|oppo|vivo|realme|motorola|sony|asus|honor|huawei|nothing|nokia|poco|redmi|iqoo|tcl|infinix|tecno|lava|blackberry|meizu|nubia|fairphone|sharp|ulefone|doogee|blackview|oukitel|umidigi|blu|wiko|lenovo|alcatel|energizer|zte|cat|gigaset|unihertz|crosscall|agm|panasonic)/i.test(slug);
+    const notAPhone = /headphone|earphone|microphone|vacuum|robot|calendar|smartwatch|tablet|laptop|notebook|macbook|chromebook|charger|powerbank|earbuds|speaker|monitor|camera(?!-sample)|drone|keyboard|mouse|printer|router|modem|tv|television|projector|refrigerator|washer/i.test(slug);
+    if ((!hasPhone && !looksLikePhoneModel) || notAPhone) return;
 
     if (seen.has(href.toLowerCase())) return;
     seen.add(href.toLowerCase());
@@ -240,34 +242,41 @@ export async function crawlOnePage(page: number): Promise<CrawlPageResult> {
 export async function crawlSync(startPage = 1, maxPages = 40, delayMs = 600): Promise<CrawlStats & { nextPage: number | null }> {
   const t0 = Date.now();
 
-  if (startPage === 1) {
-    const locked = await rSetNX(LOCK_KEY, '1', LOCK_TTL);
-    if (!locked) {
-      const stats = await getLastCrawlStats();
-      return { ...(stats ?? { totalPages: 0, totalUrls: 0, newUrls: 0, crawlMs: 0, lastCrawledAt: new Date().toISOString() }),
-        error: 'Crawl lock active — another crawl is running', nextPage: null };
-    }
+  // Always try to acquire (or refresh) the crawl lock for every batch.
+  // For startPage > 1 the previous batch released the lock, so we re-acquire here.
+  // Use a generous TTL: 60s per page + 60s buffer, capped at 3600s.
+  const dynamicTtl = Math.min(maxPages * 60 + 60, 3600);
+  const locked = await rSetNX(LOCK_KEY, '1', dynamicTtl);
+  if (!locked) {
+    // Lock exists — another process is actively crawling right now.
+    const stats = await getLastCrawlStats();
+    return {
+      ...(stats ?? { totalPages: 0, totalUrls: 0, newUrls: 0, crawlMs: 0, lastCrawledAt: new Date().toISOString() }),
+      error: 'Crawl lock active — another crawl is running', nextPage: null,
+    };
   }
 
-  let page      = startPage;
-  let newUrls   = 0;
-  let pagesRead = 0;
+  let page          = startPage;
+  let newUrls       = 0;
+  let pagesRead     = 0;
   let lastTotalUrls = 0;
+  let crawlDone     = false;
 
   try {
-    while (page < startPage + maxPages) {
-      if (page > startPage) await new Promise(r => setTimeout(r, delayMs));
+    while (pagesRead < maxPages) {
+      if (pagesRead > 0) await new Promise(r => setTimeout(r, delayMs));
       const result = await crawlOnePage(page);
       newUrls      += result.newUrls;
       pagesRead++;
       lastTotalUrls = result.totalUrls;
       console.log(`[crawl] p${page} → ${result.phonesFound} phones (total: ${result.totalUrls})`);
-      if (result.done) break;
+      if (result.done) { crawlDone = true; break; }
       page++;
     }
 
-    const reachedEnd = (await crawlOnePage(page)).done || pagesRead < maxPages;
-    const nextPage   = reachedEnd ? null : page + 1;
+    // nextPage: null means the crawl reached the end of all pages.
+    // Otherwise return the next page number so the caller can continue.
+    const nextPage = crawlDone ? null : page + 1;
 
     const stats: CrawlStats & { nextPage: number | null } = {
       totalPages: pagesRead, totalUrls: lastTotalUrls, newUrls,
@@ -275,7 +284,9 @@ export async function crawlSync(startPage = 1, maxPages = 40, delayMs = 600): Pr
     };
 
     await rSet(STATS_KEY, stats, ENTRIES_TTL);
-    if (!nextPage) { await rDel(LOCK_KEY); await rDel(PROGRESS_KEY); }
+    // Always release the lock after this batch so the next batch can acquire it.
+    await rDel(LOCK_KEY);
+    if (!nextPage) await rDel(PROGRESS_KEY);
     return stats;
 
   } catch (e: any) {
