@@ -253,14 +253,14 @@ export async function crawlOnePage(page: number): Promise<CrawlPageResult> {
   const t0  = Date.now();
 
   // ── Source 1: Smartphones review listing ─────────────────────────────────
-  // Full NBC-written reviews, sorted by date. Paginated via ?ns_page=N.
-  const reviewsUrl = page === 1 ? NBC_PHONES_BASE : `${NBC_PHONES_BASE}?ns_page=${page}`;
+  // Full NBC-written reviews, sorted by date. Paginated via ?&ns_page=N.
+  const reviewsUrl = page === 1 ? NBC_PHONES_BASE : `${NBC_PHONES_BASE}?&ns_page=${page}`;
 
   // ── Source 2: NBC Library (all-device external review aggregator) ─────────
   // Mixed feed of phones + tablets + laptops, sorted by date added.
   // extractPhoneUrls filters out tablets and laptops, keeping only phone
   // aggregator pages like Vivo-X200.919417.0.html that never appear in Source 1.
-  const libraryUrl = page === 1 ? NBC_LIBRARY_BASE : `${NBC_LIBRARY_BASE}?ns_page=${page}`;
+  const libraryUrl = page === 1 ? NBC_LIBRARY_BASE : `${NBC_LIBRARY_BASE}?&ns_page=${page}`;
 
   const [reviewsHtml, libraryHtml] = await Promise.all([
     fetchHtml(reviewsUrl),
