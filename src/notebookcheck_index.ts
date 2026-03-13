@@ -394,32 +394,49 @@ export async function rebuildSearchIndex(): Promise<void> {
 }
 
 export async function searchIndex(q: string): Promise<{ url: string; title: string } | null> {
-  const qLower = q.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-  const qTokens = qLower.split(' ').filter((t: string) => t.length >= 2);
-  if (!qTokens.length) return null;
+  // Use the same normalizer as SearXNG so "oneplus 15" → "OnePlus 15", aliases resolve, etc.
+  const { normalizeQuery } = await import('./notebookcheck');
+  const normalized = normalizeQuery(q).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const original   = q.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 
-  // Load compact search index from Redis (much faster than loading full entries)
+  // Build token set: use normalized query tokens, fall back to original
+  const makeTokens = (s: string) => s.split(' ').filter((t: string) => t.length >= 2);
+  const normTokens = makeTokens(normalized);
+  const origTokens = makeTokens(original);
+  // Prefer normalized tokens but keep originals too for recall
+  const allTokens = [...new Set([...normTokens, ...origTokens])];
+  if (!allTokens.length) return null;
+
+  // Load compact search index from Redis
   let flat: Array<{ url: string; title: string; slug: string }> = [];
   try {
     flat = await rGet(SEARCH_INDEX_KEY) as any[];
   } catch {
-    // Search index not built yet — build it now and cache it
     await rebuildSearchIndex();
     try { flat = await rGet(SEARCH_INDEX_KEY) as any[]; } catch { return null; }
   }
-
   if (!flat?.length) return null;
+
+  // Brand tokens to skip when requiring core model matches
+  const BRAND_TOKENS = new Set(['samsung','apple','google','oneplus','oppo','vivo','motorola','sony','asus','realme','honor','huawei','nothing','poco','redmi','xiaomi','galaxy','iphone','pixel']);
+  const coreTokens = normTokens.filter(t => !BRAND_TOKENS.has(t) && t.length >= 2);
 
   let best: { url: string; title: string } | null = null;
   let bestScore = 0;
 
   for (const entry of flat) {
     const haystack = (entry.title + ' ' + entry.slug).toLowerCase().replace(/[^a-z0-9]+/g, ' ');
-    const matched = qTokens.filter((t: string) => haystack.includes(t)).length;
+
+    // All core (non-brand) tokens MUST match — avoids matching wrong model entirely
+    const coreMatched = coreTokens.every(t => haystack.includes(t));
+    if (coreTokens.length > 0 && !coreMatched) continue;
+
+    const matched = allTokens.filter(t => haystack.includes(t)).length;
     let score = matched;
-    // Bonus when all tokens match — prefer shorter titles (more specific)
-    if (matched === qTokens.length) score += 10 - Math.min(10, entry.title.length / 50);
-    if (score > bestScore && matched >= Math.ceil(qTokens.length * 0.5)) {
+    // Prefer shorter titles (more specific match) when all tokens present
+    if (matched === normTokens.length) score += 10 - Math.min(10, entry.title.length / 50);
+
+    if (score > bestScore) {
       bestScore = score;
       best = { url: entry.url, title: entry.title };
     }
