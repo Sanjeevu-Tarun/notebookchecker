@@ -1,7 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import { searchAndGetDetails, searchDevice, getDeviceDetails } from './src/scraper';
-import { getNotebookCheckData, searchNotebookCheck, scrapeNotebookCheckDevice, debugNBCSearch, getNBCIndexStats } from './src/notebookcheck';
+import { getNotebookCheckData, searchNotebookCheck, scrapeNotebookCheckDevice, debugNBCSearch } from './src/notebookcheck';
 import { getGSMArenaData, searchGSMArena, scrapeGSMArenaDevice } from './src/gsmarena';
 import {
   getNotebookCheckProcessor,
@@ -17,10 +17,7 @@ import {
 const app = express();
 app.use(cors());
 
-app.get('/api/health', (_, res) => res.json({ status: 'ok', nbcIndex: getNBCIndexStats() }));
-
-// /api/nbc/index-stats — how many NBC review URLs are indexed and when last refreshed
-app.get('/api/nbc/index-stats', (_, res) => res.json(getNBCIndexStats()));
+app.get('/api/health', (_, res) => res.json({ status: 'ok' }));
 
 // ─────────────────────────────────────────────────────────────────────────────
 // /api/phone — NotebookCheck ONLY (fast version, no GSMArena)

@@ -824,264 +824,57 @@ function isRateLimitedResponse(data: unknown): boolean {
   return false;
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-//  NBC URL INDEX — built from NBC's RSS feed + brand-by-brand search
-//
-//  WHY THIS APPROACH:
-//  ──────────────────
-//  • NBC's Reviews listing page (Reviews.55.0.html) renders its article list
-//    via JavaScript — server-side pagination via ?cp=N doesn't work.
-//  • NBC's TYPO3 search (Search.8222.0.html) IS server-side, returns HTML
-//    with article links, and has no rate limit (it's NBC's own engine).
-//  • The RSS feed (RSS-Feed-Notebook-Reviews.8156.0.html) is real XML,
-//    always up to date, gives the last ~50 published reviews.
-//
-//  STRATEGY:
-//  ─────────
-//  1. STARTUP: query NBC search once per major brand (Samsung, Apple, Google…)
-//     This builds an index of ~2000+ device review URLs in ~30s at boot.
-//     Zero Google. Zero SearXNG. Just NBC's own search engine, unlimited.
-//
-//  2. HOURLY: poll the RSS feed to pick up new reviews automatically.
-//     Parses XML directly — no cheerio needed for the feed itself.
-//
-//  3. QUERY: pure in-memory fuzzy match using existing scoreCandidate().
-//     <1ms per query. Zero network. Zero rate limits. Forever.
-//
-//  4. FALLBACK: SearXNG only if index not yet ready (first ~30s after boot).
-// ═════════════════════════════════════════════════════════════════════════════
+// ─────────────────────────────────────────────────────────────────────────────
+// TOKEN-BUCKET RATE LIMITER
+// Google allows ~1 request/2 s before CAPTCHAs trigger on shared Render IPs.
+// Burst of 3 allowed at cold-start, then one slot per SEARCH_INTERVAL_MS.
+// ─────────────────────────────────────────────────────────────────────────────
+const SEARCH_INTERVAL_MS = 2000; // minimum gap between SearXNG→Google requests
+const BURST_TOKENS       = 3;    // burst capacity before throttling kicks in
+let _tokens     = BURST_TOKENS;
+let _lastRefill = Date.now();
+const _searchQueue: Array<() => void> = [];
+let   _draining  = false;
 
-interface NbcIndexEntry { url: string; title: string; }
-
-// ── INDEX STATE ───────────────────────────────────────────────────────────────
-let   nbcIndex: NbcIndexEntry[]  = [];
-let   nbcIndexBuilding           = false;
-let   nbcIndexBuiltAt            = 0;
-const NBC_INDEX_TTL_MS           = 6 * 60 * 60 * 1000; // full rebuild every 6h
-const NBC_RSS_INTERVAL_MS        = 60 * 60 * 1000;      // RSS poll every 1h
-let   nbcRssLastPolledAt         = 0;
-const NBC_BASE                   = 'https://www.notebookcheck.net';
-const NBC_SEARCH_URL             = `${NBC_BASE}/Search.8222.0.html`;
-const NBC_RSS_URL                = `${NBC_BASE}/RSS-Feed-Notebook-Reviews.8156.0.html`;
-
-// Major brands to search at startup.
-// NBC search is free, server-side, and has no rate limit — fine to batch at boot.
-// Each query returns ~10 results; together they cover >95% of real-world queries.
-const NBC_INDEX_BRANDS = [
-  'Samsung', 'Apple', 'Google Pixel', 'Xiaomi', 'OnePlus', 'Oppo', 'Vivo',
-  'Motorola', 'Sony Xperia', 'Asus', 'Realme', 'Honor', 'Huawei', 'Nokia',
-  'Nothing', 'Poco', 'Redmi', 'iQOO', 'Infinix', 'Tecno', 'TCL', 'ZTE',
-  'Lenovo', 'BlackBerry', 'HTC', 'LG', 'Nubia', 'Fairphone', 'CAT', 'Doogee',
-];
-
-// ── HELPERS ───────────────────────────────────────────────────────────────────
-
-/** Extract review article links from NBC search result HTML */
-function extractNbcSearchLinks(html: string, seen: Set<string>): NbcIndexEntry[] {
-  const entries: NbcIndexEntry[] = [];
-  const $ = cheerio.load(html);
-
-  // TYPO3 IndexedSearch result structure (verified on NBC):
-  // <ul class="tx-indexedsearch-res"> or <div class="tx-indexedsearch-res">
-  //   <li> ... <a href="/Device-Name.NNNNNN.0.html">Title</a> ... </li>
-  //
-  // If TYPO3 classes not present, fall back to any article-ID link on the page.
-  const selectors = [
-    '.tx-indexedsearch-res a',
-    '.tx-indexedsearch-res-title a',
-    '#tx-indexedsearch-res a',
-    '.results-list a',
-    '.search-results a',
-  ];
-
-  let found = false;
-  for (const sel of selectors) {
-    $(sel).each((_, el) => {
-      const href  = $(el).attr('href') || '';
-      const title = norm($(el).text());
-      if (!title || title.length < 3) return;
-      const url = href.startsWith('http') ? href
-        : href.startsWith('/') ? NBC_BASE + href : '';
-      if (!url || seen.has(url)) return;
-      if (!/\.\d{4,}\.0\.html/.test(url)) return;
-      if (/[?&](tag|q|word|id)=/.test(url)) return;
-      if (/\/(Search|RSS|index)\.\d/i.test(url)) return;
-      seen.add(url);
-      entries.push({ url, title });
-      found = true;
-    });
-    if (found) break;
-  }
-
-  // Fallback: all article-ID links on the page (catches any TYPO3 template variant)
-  if (!found) {
-    $('a[href]').each((_, el) => {
-      const href  = $(el).attr('href') || '';
-      const title = norm($(el).text());
-      if (!title || title.length < 3) return;
-      const url = href.startsWith('http') ? href
-        : href.startsWith('/') ? NBC_BASE + href : '';
-      if (!url || !url.includes('notebookcheck.net') || seen.has(url)) return;
-      if (!/\.\d{4,}\.0\.html/.test(url)) return;
-      if (/[?&](tag|q|word|id)=/.test(url)) return;
-      if (/\/(Topics|Search|Smartphones|Tablet|Laptop|Netbook|RSS|index|Reviews|News|Magazine)\.\d/i.test(url)) return;
-      // Only keep review-looking URLs (not news/opinion)
-      if (/users?[-_]complain|rumou?r|leaked|announced|price[-_]drop/i.test(url)) return;
-      seen.add(url);
-      entries.push({ url, title });
-    });
-  }
-
-  return entries;
-}
-
-/** Query NBC's own search for one brand and return found review entries */
-async function searchNBCForBrand(brand: string, seen: Set<string>): Promise<NbcIndexEntry[]> {
-  try {
-    const postBody = new URLSearchParams({
-      'tx_indexedsearch_pi2[search][sword]': `${brand} review`,
-      'tx_indexedsearch_pi2[action]': 'search',
-    }).toString();
-
-    const resp = await sharedAxios.post(NBC_SEARCH_URL, postBody, {
-      headers: {
-        'User-Agent':      randomUA(),
-        'Content-Type':    'application/x-www-form-urlencoded',
-        'Accept':          'text/html,application/xhtml+xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Referer':         NBC_BASE + '/',
-        'Origin':          NBC_BASE,
-      },
-      timeout: 8000,
-    });
-
-    const html = typeof resp.data === 'string' ? resp.data : '';
-    return html ? extractNbcSearchLinks(html, seen) : [];
-
-  } catch (e) {
-    log('debug', 'nbc.index.brand_search_fail', { brand, err: (e as Error).message });
-    return [];
+function _refillTokens(): void {
+  const now     = Date.now();
+  const newToks = Math.floor((now - _lastRefill) / SEARCH_INTERVAL_MS);
+  if (newToks > 0) {
+    _tokens     = Math.min(BURST_TOKENS, _tokens + newToks);
+    _lastRefill = now;
   }
 }
 
-/** Parse NBC's RSS feed XML and return new review entries */
-async function pollNBCRss(seen: Set<string>): Promise<NbcIndexEntry[]> {
-  const entries: NbcIndexEntry[] = [];
-  try {
-    const resp = await sharedAxios.get(NBC_RSS_URL, {
-      headers: { 'User-Agent': randomUA(), 'Accept': 'application/rss+xml, application/xml, text/xml' },
-      timeout: 8000,
-      responseType: 'text',
-    });
-
-    const xml   = typeof resp.data === 'string' ? resp.data : '';
-    const items = xml.match(/<item>[\s\S]*?<\/item>/g) || [];
-
-    for (const item of items) {
-      const linkMatch = item.match(/<link>(https?:\/\/[^<]+)<\/link>/);
-      const titleMatch = item.match(/<title><!\[CDATA\[([\s\S]*?)\]\]><\/title>/) ||
-                         item.match(/<title>([\s\S]*?)<\/title>/);
-
-      const url   = linkMatch?.[1]?.trim()  || '';
-      const title = titleMatch?.[1]?.trim() || '';
-
-      if (!url || !url.includes('notebookcheck.net')) continue;
-      if (!/\.\d{4,}\.0\.html/.test(url)) continue;
-      if (seen.has(url)) continue;
-      if (/users?[-_]complain|rumou?r|leaked|announced|price[-_]drop/i.test(url)) continue;
-
-      seen.add(url);
-      entries.push({ url, title: norm(title) || url });
+function _drainQueue(): void {
+  if (_draining) return;
+  _draining = true;
+  const tick = () => {
+    _refillTokens();
+    if (_tokens > 0 && _searchQueue.length > 0) {
+      _tokens--;
+      _searchQueue.shift()!();
     }
-
-    log('info', 'nbc.rss.polled', { newEntries: entries.length });
-  } catch (e) {
-    log('warn', 'nbc.rss.poll_fail', { err: (e as Error).message });
-  }
-  return entries;
+    if (_searchQueue.length > 0) setTimeout(tick, SEARCH_INTERVAL_MS);
+    else _draining = false;
+  };
+  tick();
 }
 
-/** Build the full NBC URL index from brand searches + RSS */
-async function buildNBCIndex(): Promise<void> {
-  if (nbcIndexBuilding) return;
-  nbcIndexBuilding = true;
-  const t0 = Date.now();
-  log('info', 'nbc.index.build_start', { brands: NBC_INDEX_BRANDS.length });
-
-  try {
-    const seen    = new Set<string>();
-    const all:    NbcIndexEntry[] = [];
-
-    // Start with RSS to get the most recent reviews immediately
-    const rssEntries = await pollNBCRss(seen);
-    all.push(...rssEntries);
-    nbcRssLastPolledAt = Date.now();
-
-    // Brand-by-brand NBC search — stagger requests 500ms apart to be polite
-    for (const brand of NBC_INDEX_BRANDS) {
-      const entries = await searchNBCForBrand(brand, seen);
-      all.push(...entries);
-      log('debug', 'nbc.index.brand_done', { brand, found: entries.length, total: all.length });
-      await new Promise(r => setTimeout(r, 500)); // 500ms between brand queries
-    }
-
-    nbcIndex    = all;
-    nbcIndexBuiltAt = Date.now();
-    log('info', 'nbc.index.build_done', { entries: all.length, ms: Date.now() - t0 });
-
-  } catch (e) {
-    log('error', 'nbc.index.build_fail', { err: (e as Error).message });
-  } finally {
-    nbcIndexBuilding = false;
-  }
+/** Acquire a rate-limit slot before every SearXNG/Google request. */
+function acquireSearchSlot(): Promise<void> {
+  _refillTokens();
+  if (_tokens > 0) { _tokens--; return Promise.resolve(); }
+  return new Promise<void>(resolve => { _searchQueue.push(resolve); _drainQueue(); });
 }
 
-/** Add new RSS entries to live index without full rebuild */
-async function refreshNBCIndexFromRss(): Promise<void> {
-  if (nbcIndex.length === 0) return; // let full build handle it
-  const seen = new Set(nbcIndex.map(e => e.url));
-  const entries = await pollNBCRss(seen);
-  if (entries.length > 0) {
-    nbcIndex = [...entries, ...nbcIndex]; // prepend newest
-    log('info', 'nbc.index.rss_refresh', { added: entries.length, total: nbcIndex.length });
-  }
-  nbcRssLastPolledAt = Date.now();
-}
-
-function nbcIndexReady(): boolean { return nbcIndex.length > 0; }
-
-function maybeRefreshIndex(): void {
-  if (nbcIndexBuilding) return;
-  // Full rebuild if TTL expired
-  if (Date.now() - nbcIndexBuiltAt > NBC_INDEX_TTL_MS) {
-    buildNBCIndex().catch(() => {});
-    return;
-  }
-  // Light RSS poll if 1h elapsed since last poll
-  if (Date.now() - nbcRssLastPolledAt > NBC_RSS_INTERVAL_MS) {
-    refreshNBCIndexFromRss().catch(() => {});
-  }
-}
-
-// Kick off initial index build 3s after module load
-setTimeout(() => buildNBCIndex().catch(() => {}), 3000);
-
-// ── IN-MEMORY SEARCH ─────────────────────────────────────────────────────────
-
-function searchNBCIndex(nq: string, oq: string): SearchResult[] {
-  if (!nbcIndexReady()) return [];
-  maybeRefreshIndex();
-
-  const results: SearchResult[] = [];
-  for (const e of nbcIndex) {
-    const sc = scoreCandidate(e.title, e.url, nq, oq);
-    if (sc >= 0) results.push({ url: e.url, title: e.title, score: sc });
-  }
-  return results.sort((a, b) => b.score - a.score).slice(0, 10);
-}
-
-// ── IN-FLIGHT DEDUP ───────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// IN-FLIGHT DEDUPLICATION
+// If two callers search the same query simultaneously, share the in-flight
+// Promise — second caller pays 0 extra tokens and gets the result instantly
+// when the first resolves.
+// ─────────────────────────────────────────────────────────────────────────────
 const _inFlight = new Map<string, Promise<SearchResult[]>>();
+
 function _dedupSearch(key: string, fn: () => Promise<SearchResult[]>): Promise<SearchResult[]> {
   if (_inFlight.has(key)) return _inFlight.get(key)!;
   const p = fn().finally(() => _inFlight.delete(key));
@@ -1089,69 +882,163 @@ function _dedupSearch(key: string, fn: () => Promise<SearchResult[]>): Promise<S
   return p;
 }
 
-// ── SEARXNG FALLBACK ─────────────────────────────────────────────────────────
-async function _searchViaSearXNGFallback(nq: string, oq: string, signal?: AbortSignal): Promise<SearchResult[]> {
-  const seen  = new Set<string>();
-  const instances = ['https://searxng-notebookcheck.onrender.com'];
-  const primaryQ  = nq.length > oq.length ? nq : oq;
+// ─────────────────────────────────────────────────────────────────────────────
+// GOOGLE RATE-LIMIT DETECTOR
+// When rate-limited Google returns HTTP 200 with a CAPTCHA HTML page (not 429).
+// SearXNG surfaces this as 0 results or via the unresponsive_engines field.
+// Detect both and throw so the circuit breaker fires and we back off properly.
+// ─────────────────────────────────────────────────────────────────────────────
+function isRateLimitedResponse(data: unknown): boolean {
+  if (typeof data !== 'object' || !data) return false;
+  const d = data as Record<string, unknown>;
+  // SearXNG sometimes leaks captcha text into the answers[] array
+  if (Array.isArray(d.answers) && d.answers.some((a: unknown) =>
+    typeof a === 'string' && /unusual traffic|captcha|automated queries/i.test(a))) return true;
+  // unresponsive_engines: google marked as rate-limited
+  if (Array.isArray(d.unresponsive_engines) && d.unresponsive_engines.some((e: unknown) =>
+    typeof e === 'object' && e !== null &&
+    /google/i.test(String((e as any).name ?? '')) &&
+    /429|rate.?limit|captcha|blocked/i.test(String((e as any).error ?? '')))) return true;
+  return false;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SEARCH: SearXNG — throttled, deduplicated, rate-limit-aware
+// ─────────────────────────────────────────────────────────────────────────────
+export async function searchViaSearXNG(nq: string, oq: string, signal?: AbortSignal): Promise<SearchResult[]> {
+  // Reuse in-flight promise for identical concurrent queries (0 token cost)
+  return _dedupSearch(`${nq}||${oq}`, () => _searchViaSearXNGInner(nq, oq, signal));
+}
+
+async function _searchViaSearXNGInner(nq: string, oq: string, signal?: AbortSignal): Promise<SearchResult[]> {
+  const seen      = new Set<string>();
+  const debugLog: any[] = [];
+  debugLog.push({ step: 'start', normalizedQuery: nq, originalQuery: oq });
+
+  // Only use your own instance — public ones are blocked/rate-limited
+  const instances = [
+    'https://searxng-notebookcheck.onrender.com',
+  ];
+
+  // ── SINGLE QUERY STRATEGY ─────────────────────────────────────────────────
+  // Old code fired oq AND nq in parallel = 2 Google hits per search.
+  // New: pick the single best form; only fall back to the other if 0 results.
+  // This halves token consumption immediately.
+  const primaryQuery = (nq !== oq && nq.length > oq.length) ? nq : oq;
+  debugLog.push({ step: 'query', primaryQuery, nq, oq });
+
+  const doSearch = async (base: string, q: string): Promise<ExternalResultItem[]> => {
+    // Enforce the rate limit before EVERY Google request
+    await acquireSearchSlot();
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+
+    debugLog.push({ step: 'request', base, query: q, fullQuery: `site:notebookcheck.net ${q} review` });
+
+    const resp = await sharedAxios.get(`${base}/search`, {
+      params: {
+        q: `site:notebookcheck.net ${q} review`,
+        format: 'json',
+        engines: 'google,bing',
+        categories: 'general',
+      },
+      headers: { 'User-Agent': randomUA(), 'Accept': 'application/json' },
+      timeout: 8000,
+      signal,
+    });
+
+    // Detect Google CAPTCHA masquerading as a normal 200 response
+    if (isRateLimitedResponse(resp.data)) {
+      throw Object.assign(new Error('Google rate-limited (CAPTCHA detected)'), { isRateLimit: true });
+    }
+
+    const results = (resp.data?.results || []) as ExternalResultItem[];
+    debugLog.push({
+      step: 'response', base, query: q,
+      rawResultCount: results.length, statusCode: resp.status,
+      sampleResults: results.slice(0, 3).map(r => ({ url: r.url, title: r.title })),
+    });
+    return results;
+  };
 
   for (const base of instances) {
-    if (circuitIsOpen(base)) continue;
+    if (circuitIsOpen(base)) {
+      debugLog.push({ step: 'circuit_open', base });
+      log('warn', 'searxng.circuit_open', { base });
+      continue;
+    }
+    debugLog.push({ step: 'trying_instance', base });
+
     try {
-      const resp = await sharedAxios.get(`${base}/search`, {
-        params: { q: `site:notebookcheck.net ${primaryQ} review`, format: 'json', engines: 'google,bing', categories: 'general' },
-        headers: { 'User-Agent': randomUA(), 'Accept': 'application/json' },
-        timeout: 8000, signal,
-      });
-      const items = (resp.data?.results || []) as ExternalResultItem[];
+      // Primary query first; only try alternate form if 0 results (saves tokens)
+      let items = await doSearch(base, primaryQuery);
+
+      if (items.length === 0 && nq !== oq) {
+        const fallbackQ = primaryQuery === nq ? oq : nq;
+        log('info', 'searxng.fallback_query', { base, fallbackQ });
+        items = await doSearch(base, fallbackQ);
+      }
+
+      debugLog.push({ step: 'parallel_results', base, totalRawResults: items.length });
+
       if (items.length > 0) {
         circuitRecordSuccess(base);
         const all: SearchResult[] = [];
+        let droppedCount = 0;
+        const dropReasons: Record<string, number> = {};
+
         for (const item of items) {
-          const url = (item.url || '').trim(), title = (item.title || '').trim();
-          if (!url.includes('notebookcheck.net') || !/\.\d{4,}\.0\.html/.test(url) || seen.has(url)) continue;
-          if (/[?&](tag|q|word)=/.test(url) || /\/(Topics|Search|Smartphones|RSS|index)\.\d/i.test(url)) continue;
+          const url   = (item.url   || '').trim();
+          const title = (item.title || '').trim();
+
+          if (!url.includes('notebookcheck.net'))                            { droppedCount++; dropReasons['not_notebookcheck'] = (dropReasons['not_notebookcheck'] || 0) + 1; debugLog.push({ step: 'drop', reason: 'not_notebookcheck', url, title }); continue; }
+          if (!/\.\d{4,}\.0\.html/.test(url))                               { droppedCount++; dropReasons['wrong_url_format']  = (dropReasons['wrong_url_format']  || 0) + 1; debugLog.push({ step: 'drop', reason: 'wrong_url_format', url, title }); continue; }
+          if (seen.has(url))                                                 { droppedCount++; dropReasons['duplicate']         = (dropReasons['duplicate']         || 0) + 1; continue; }
+          if (/[?&](tag|q|word)=/.test(url) ||
+              /\/(Topics|Search|Smartphones|RSS|index)\.\d/i.test(url))     { droppedCount++; dropReasons['tag_or_listing']   = (dropReasons['tag_or_listing']   || 0) + 1; debugLog.push({ step: 'drop', reason: 'tag_or_listing', url, title }); continue; }
+
           const sc = scoreCandidate(title || url, url, nq, oq);
-          if (sc < 0) continue;
-          seen.add(url); all.push({ url, title: title || url, score: sc });
+          if (sc < 0)                                                        { droppedCount++; dropReasons['score_negative']   = (dropReasons['score_negative']   || 0) + 1; debugLog.push({ step: 'drop', reason: 'score_negative', score: sc, url, title }); continue; }
+
+          seen.add(url);
+          all.push({ url, title: title || url, score: sc });
+          debugLog.push({ step: 'keep', score: sc, url, title });
         }
+
+        debugLog.push({
+          step: 'final', base,
+          rawResults: items.length, droppedResults: droppedCount, dropReasons,
+          finalResults: all.length,
+          topResults: all.slice(0, 3).map(r => ({ score: r.score, url: r.url, title: r.title })),
+        });
+        (globalThis as any).__searxng_debug = debugLog;
         return all;
+
+      } else {
+        debugLog.push({ step: 'zero_raw_results', base, primaryQuery });
       }
+
     } catch (e: unknown) {
-      const err = e as Error;
-      if (err.name !== 'AbortError') { circuitRecordFailure(base); }
+      const err = e as Error & { isRateLimit?: boolean };
+      debugLog.push({ step: 'instance_error', base, error: err.message, errorName: err.name });
+
+      if (err.name !== 'AbortError') {
+        if (err.isRateLimit) {
+          // Double-penalty on rate-limit → trips circuit breaker faster
+          circuitRecordFailure(base);
+          circuitRecordFailure(base);
+          log('warn', 'searxng.rate_limited', { base });
+        } else {
+          circuitRecordFailure(base);
+        }
+        log('error', 'searxng.failed', { base, err: err.message, errName: err.name });
+      }
     }
   }
+
+  debugLog.push({ step: 'all_failed', query: nq, instances });
+  (globalThis as any).__searxng_debug = debugLog;
+  log('error', 'searxng.all_instances_failed', { query: nq, instances, debugLog });
   return [];
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// PUBLIC ENTRY POINT (keeps backward-compatible name)
-//
-//  Path A (normal):   NBC index ready → instant in-memory match (<1ms)
-//  Path B (cold boot, first ~30s): index building → SearXNG temporarily
-// ─────────────────────────────────────────────────────────────────────────────
-export async function searchViaSearXNG(nq: string, oq: string, signal?: AbortSignal): Promise<SearchResult[]> {
-  return _dedupSearch(`${nq}||${oq}`, async () => {
-    const indexResults = searchNBCIndex(nq, oq);
-    if (indexResults.length > 0) {
-      log('info', 'search.nbc_index_hit', { nq, count: indexResults.length });
-      return indexResults;
-    }
-    log('info', 'search.nbc_index_miss_fallback', { nq, indexSize: nbcIndex.length, ready: nbcIndexReady() });
-    return _searchViaSearXNGFallback(nq, oq, signal);
-  });
-}
-
-export function getNBCIndexStats() {
-  return {
-    entries:      nbcIndex.length,
-    ready:        nbcIndexReady(),
-    building:     nbcIndexBuilding,
-    builtAt:      nbcIndexBuiltAt,
-    ageMs:        Date.now() - nbcIndexBuiltAt,
-    rssLastPoll:  nbcRssLastPolledAt,
-  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
