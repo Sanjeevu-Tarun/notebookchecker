@@ -31,7 +31,7 @@ const LOCK_TTL      = 300;
 // Smartphone-specific listing pages on NotebookCheck
 // Reviews.55.0.html = all reviews (mostly laptops), Smartphones.155.0.html = phones only
 const NBC_REVIEWS_BASE  = 'https://www.notebookcheck.net/Reviews.55.0.html';
-const NBC_PHONES_BASE   = 'https://www.notebookcheck.net/Smartphones.155.0.html';
+const NBC_PHONES_BASE   = 'https://www.notebookcheck.net/Reviews.55.0.html';
 
 // ── TYPES ─────────────────────────────────────────────────────────────────────
 
@@ -379,6 +379,54 @@ export async function getEntry(url: string): Promise<IndexEntry | null> {
 // ══════════════════════════════════════════════════════════════════════════════
 //  WRITE FUNCTIONS
 // ══════════════════════════════════════════════════════════════════════════════
+
+// ── SEARCH INDEX ─────────────────────────────────────────────────────────────
+// Searches all indexed entries for the best match.
+// Uses a Redis-cached search index (flat list of {url, title, slug}) to avoid
+// loading the full entries object on every request.
+
+const SEARCH_INDEX_KEY = `nbc:index:v3:search_index`;
+
+export async function rebuildSearchIndex(): Promise<void> {
+  const entries = await loadEntries();
+  const flat = Object.values(entries).map((e: IndexEntry) => ({ url: e.url, title: e.title, slug: e.slug }));
+  await rSetPermanent(SEARCH_INDEX_KEY, flat);
+}
+
+export async function searchIndex(q: string): Promise<{ url: string; title: string } | null> {
+  const qLower = q.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const qTokens = qLower.split(' ').filter((t: string) => t.length >= 2);
+  if (!qTokens.length) return null;
+
+  // Load compact search index from Redis (much faster than loading full entries)
+  let flat: Array<{ url: string; title: string; slug: string }> = [];
+  try {
+    flat = await rGet(SEARCH_INDEX_KEY) as any[];
+  } catch {
+    // Search index not built yet — build it now and cache it
+    await rebuildSearchIndex();
+    try { flat = await rGet(SEARCH_INDEX_KEY) as any[]; } catch { return null; }
+  }
+
+  if (!flat?.length) return null;
+
+  let best: { url: string; title: string } | null = null;
+  let bestScore = 0;
+
+  for (const entry of flat) {
+    const haystack = (entry.title + ' ' + entry.slug).toLowerCase().replace(/[^a-z0-9]+/g, ' ');
+    const matched = qTokens.filter((t: string) => haystack.includes(t)).length;
+    let score = matched;
+    // Bonus when all tokens match — prefer shorter titles (more specific)
+    if (matched === qTokens.length) score += 10 - Math.min(10, entry.title.length / 50);
+    if (score > bestScore && matched >= Math.ceil(qTokens.length * 0.5)) {
+      bestScore = score;
+      best = { url: entry.url, title: entry.title };
+    }
+  }
+
+  return best;
+}
 
 // Cache key for full scraped device data — stored separately from index entries
 function scrapeDataKey(url: string): string {

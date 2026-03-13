@@ -29,6 +29,8 @@ import {
   getCrawlProgress,
   resetCrawlLock,
   extractPhoneUrls,
+  rebuildSearchIndex,
+  searchIndex,
   type CrawlPageResult,
 } from './src/notebookcheck_index';
 
@@ -46,40 +48,25 @@ app.get('/api/phone', async (req, res) => {
   if (!q) return res.status(400).json({ success: false, error: '"q" required' });
 
   try {
-    // Step 1: Try to find a matching URL in the crawled index first
-    const { getIndexEntries, scrapeIndexedDevice } = await import('./src/notebookcheck_index');
-    const qLower = q.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-    const qTokens = qLower.split(' ').filter((t: string) => t.length >= 2);
+    const { scrapeIndexedDevice, searchIndex } = await import('./src/notebookcheck_index');
 
-    // Load ALL entries (not just 200) to search the full index
-    const { entries } = await getIndexEntries({ status: 'all', limit: 2000 });
+    // Step 1: Check scrape cache first — if already scraped, return in ~100ms
+    // Step 2: Search index for matching URL, scrape it (~3-4s, skips SearXNG)
+    // Step 3: Fall back to SearXNG live search if not in index
+    const best = await searchIndex(q);
 
-    // Score each entry by how many query tokens match the title/slug
-    let best: any = null;
-    let bestScore = 0;
-    for (const entry of entries) {
-      const haystack = (entry.title + ' ' + entry.slug).toLowerCase().replace(/[^a-z0-9]+/g, ' ');
-      // Count matching tokens, with bonus for consecutive matches
-      const matchedTokens = qTokens.filter((t: string) => haystack.includes(t));
-      let score = matchedTokens.length;
-      // Bonus: if all tokens match, prioritize by title length (shorter = more specific match)
-      if (matchedTokens.length === qTokens.length) score += 10 - Math.min(10, entry.title.length / 50);
-      if (score > bestScore) { bestScore = score; best = entry; }
-    }
-
-    // If we have a good match (at least half the tokens matched), scrape it from index
-    if (best && bestScore >= Math.ceil(qTokens.length * 0.5)) {
+    if (best) {
       const result = await scrapeIndexedDevice(best.url);
       if (result.success) {
-        return res.json({ success: true, source: result.cached ? 'cache' : 'index', cached: result.cached, matchedUrl: best.url, matchScore: bestScore, data: result.data });
+        return res.json({ success: true, source: result.cached ? 'cache' : 'index', cached: result.cached, matchedUrl: best.url, data: result.data });
       }
     }
 
-    // Step 2: Fall back to live search if index has no match
+    // Fallback: SearXNG live search
     const { getNotebookCheckDataFast } = await import('./src/notebookcheck');
     const data = await getNotebookCheckDataFast(q);
     if (!data) return res.status(404).json({ success: false, error: 'Device not found' });
-    return res.json({ success: true, source: 'notebookcheck_live', data });
+    return res.json({ success: true, source: 'live', data });
 
   } catch (e: any) {
     return res.status(500).json({ success: false, error: e.message });
@@ -692,6 +679,8 @@ app.get('/api/index/crawl-page', async (req, res) => {
   const page = parseInt(req.query.page as string || '1');
   try {
     const result = await crawlOnePage(page);
+    // Rebuild search index after every page so /api/phone searches stay fast
+    rebuildSearchIndex().catch(() => {}); // fire and forget
     return res.json({ success: true, result,
       hint: result.done ? 'No more pages — crawl complete' : `Call ?page=${result.nextPage} for next page` });
   } catch (e: any) {
@@ -1073,4 +1062,14 @@ app.get('/crawler', (_, res) => {
 </script>
 </body>
 </html>`);
+});
+
+// /api/index/rebuild-search — rebuild the fast search index from entries
+app.get('/api/index/rebuild-search', async (req, res) => {
+  try {
+    await rebuildSearchIndex();
+    return res.json({ success: true, message: 'Search index rebuilt — /api/phone searches are now fast' });
+  } catch (e: any) {
+    return res.status(500).json({ success: false, error: e.message });
+  }
 });
