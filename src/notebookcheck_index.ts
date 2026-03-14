@@ -452,6 +452,26 @@ function isJunkSlug(slug: string): boolean {
   );
 }
 
+// Extract clean device name from a review page link.
+// For descriptive article titles like "More than just an unusual camera setup – Vivo X300 Pro review"
+// we prefer the part after a separator (–, :, |) if it looks like a device name.
+// Fallback: last 4 words of the pre-review slug.
+function extractDeviceTitle(linkText: string, url: string): string {
+  // Try: split on — – | : and take the last segment that looks like a device name
+  const parts = linkText.split(/\s*[–—|:]\s*/);
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const part = parts[i].replace(/\breview\b/gi, '').replace(/\s+/g, ' ').trim();
+    if (part.length > 3 && part.length < 50 && !/\b(the|a|an|is|in|for|with|of|to)\b/i.test(part)) {
+      return part;
+    }
+  }
+  // Fallback: extract from slug — last 4 words before "-review"
+  const slug = url.split('/').pop() || '';
+  const pre = slug.split(/-review[-_.]/i)[0].replace(/-/g, ' ').trim();
+  const words = pre.split(' ').filter(w => w.length > 1);
+  return words.slice(-4).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ') || linkText.slice(0, 50);
+}
+
 export function extractPhoneUrls(html: string): Array<{ url: string; title: string }> {
   const $ = cheerio.load(html);
   const out: Array<{ url: string; title: string }> = [];
@@ -540,7 +560,7 @@ export async function crawlReviewsPage(page: number): Promise<CrawlPageResult> {
 
     const title = ($(el).attr('title') || $(el).text().trim() || '')
       .replace(/^\d+%\s*/, '').replace(/\s+/g, ' ').trim().slice(0, 120);
-    const cleanTitle = title.split(/\s*[|—–:]\s*/)[0].split(' - ')[0].replace(/\breviews?\b/gi, '').replace(/\s+/g, ' ').trim();
+    const cleanTitle = extractDeviceTitle(title, href);
     if (cleanTitle.length < 4) return;
     found.push({ url: href, title: cleanTitle });
   });
