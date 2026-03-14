@@ -145,7 +145,7 @@ export async function resolveLibraryUrlsPage(offset: number): Promise<{
   total: number; offset: number; done: boolean;
 }> {
   const entries = await loadEntries();
-  const libraryUrls = Object.keys(entries).filter(u => !/-review[-_.]/i.test(u));
+  const libraryUrls = Object.keys(entries).filter(u => !/-review[-_.]/i.test(u));  // NEVER include review URLs
   const total = libraryUrls.length;
   const batch = libraryUrls.slice(offset, offset + RESOLVE_BATCH);
   const done = offset + RESOLVE_BATCH >= total;
@@ -168,8 +168,12 @@ export async function resolveLibraryUrlsPage(offset: number): Promise<{
 
       alreadyReview++;
 
-      // If index already has the review URL, nothing to do
-      if (entries[reviewUrl]) return;
+      // Review URL already in index from Source A — still delete the library duplicate
+      if (entries[reviewUrl]) {
+        delete entries[libraryUrl];
+        resolved++;
+        return;
+      }
 
       // Add internal review URL, drop library URL
       const slug = reviewUrl.split('/').pop() || '';
@@ -199,7 +203,7 @@ export async function resolveLibraryUrlsPage(offset: number): Promise<{
 // Legacy full-batch version (kept for compatibility — only safe when resolve cache is warm)
 export async function recoverDeletedReviewUrls(): Promise<{ recovered: number; alreadyPresent: number; totalCacheKeys: number }> {
   const entries = await loadEntries();
-  const libraryUrls = Object.keys(entries).filter(u => !/-review[-_.]/i.test(u));
+  const libraryUrls = Object.keys(entries).filter(u => !/-review[-_.]/i.test(u));  // NEVER include review URLs
   const totalCacheKeys = libraryUrls.length;
   let recovered = 0, alreadyPresent = 0;
 
@@ -320,7 +324,7 @@ export async function resolveToReviewUrl(libraryUrl: string): Promise<string> {
       if (href.startsWith('/')) href = 'https://www.notebookcheck.net' + href;
       if (!href.startsWith('https://www.notebookcheck.net')) return;
       href = href.split('?')[0];
-      if (!/-review[-_.]/i.test(href)) return;
+      if (!/-review[-_.]/i.test(href)) return;  // NEVER include review URLs
       if (!/\.\d{4,}\.0\.html$/.test(href)) return;
       if (!isJunkSlug(href.split('/').pop() || '')) reviewUrl = href;
     });
@@ -344,7 +348,7 @@ export async function resolveToReviewUrl(libraryUrl: string): Promise<string> {
       if (href.startsWith('/')) href = 'https://www.notebookcheck.net' + href;
       if (!href.startsWith('https://www.notebookcheck.net')) return;
       href = href.split('?')[0];
-      if (!/-review[-_.]/i.test(href)) return;
+      if (!/-review[-_.]/i.test(href)) return;  // NEVER include review URLs
       if (!/\.\d{4,}\.0\.html$/.test(href)) return;
 
       // The review slug must start with the device name words
@@ -366,7 +370,7 @@ export async function resolveToReviewUrl(libraryUrl: string): Promise<string> {
       if (href.startsWith('/')) href = 'https://www.notebookcheck.net' + href;
       if (!href.startsWith('https://www.notebookcheck.net')) return;
       href = href.split('?')[0];
-      if (!/-review[-_.]/i.test(href)) return;
+      if (!/-review[-_.]/i.test(href)) return;  // NEVER include review URLs
       if (!/\.\d{4,}\.0\.html$/.test(href)) return;
       const reviewSlug = (href.split('/').pop() || '').toLowerCase();
       if (reviewSlug.startsWith(librarySlug.slice(0, 10)) && !isJunkSlug(reviewSlug)) {
@@ -848,7 +852,7 @@ export async function purgeLibraryDuplicates(): Promise<{ purged: number; kept: 
   // e.g. "fe" substring matches "perfectly", purging Vivo X300 FE when only X300 has a review.
   const reviewTitles = new Set<string>();
   for (const [url, e] of Object.entries(entries)) {
-    if (!/-review[-_.]/i.test(url)) continue;
+    if (!/-review[-_.]/i.test(url)) continue;  // NEVER include review URLs
     if (isJunkSlug(url.split('/').pop() || '')) continue;
     reviewTitles.add(e.title.toLowerCase().trim());
   }
@@ -857,15 +861,17 @@ export async function purgeLibraryDuplicates(): Promise<{ purged: number; kept: 
   for (const [url, e] of Object.entries(entries)) {
     const slug = url.split('/').pop() || '';
 
+    // ABSOLUTE SAFETY: never touch any URL that is a genuine internal review.
+    // This check runs before everything else — no other rule can override it.
+    if (/-review[-_.]/i.test(url)) continue;
+
     // Rule 0: junk article that slipped through crawl (comparison, camera test, etc.)
+    // Note: isJunkSlug only runs on non-review URLs (guard above already skipped reviews).
     if (isJunkSlug(slug)) {
       toDelete.push(url);
       reasons.junkTitle++;
       continue;
     }
-
-    // Never delete genuine internal review URLs
-    if (/-review[-_.]/i.test(url)) continue;
 
     // Rule 1: junk title (article snippet — too long to be a clean device name)
     if (e.title.length > 80) {
