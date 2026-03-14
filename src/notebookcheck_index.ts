@@ -616,7 +616,22 @@ export async function crawlSmartphonePage(page: number): Promise<CrawlPageResult
   let newUrls = 0;
   for (const { url: u, title } of toResolve) {
     if (entries[u]) continue;
-    entries[u] = makeEntry(u, title);
+    let finalUrl = u;
+    let finalTitle = title;
+    if (!/-review[-_.]/i.test(u)) {
+      try {
+        const ck = `nbc:review_resolve:${u}`;
+        const cached = await rGet(ck) as string;
+        if (cached && cached !== u && /-review[-_.]/i.test(cached)) {
+          finalUrl = cached;
+          const slug = cached.split('/').pop() || '';
+          const raw = slug.split(/-review[-_.]/i)[0].replace(/-/g, ' ').trim();
+          finalTitle = raw.split(' ').map((w: string) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+        }
+      } catch { /* cache miss */ }
+    }
+    if (entries[finalUrl]) continue;
+    entries[finalUrl] = makeEntry(finalUrl, finalTitle);
     newUrls++;
   }
 
@@ -647,22 +662,43 @@ export async function crawlChronoPage(page: number): Promise<CrawlPageResult> {
 
   const entries = await loadEntries();
 
-  // Build review prefix set — skip devices already covered by a review URL
-  const reviewPrefixes = new Set<string>();
-  for (const u of Object.keys(entries)) {
-    if (/-review[-_.]/i.test(u)) {
-      const slug = u.split('/').pop() || '';
-      reviewPrefixes.add(slug.toLowerCase().split(/-review[-_.]/i)[0]);
+  // Build a set of clean device titles that already have an internal review in the index.
+  // Used to skip library URLs whose device is already covered.
+  // Title-based matching is safe — "Vivo X300 Pro" only matches "Vivo X300 Pro", never "Vivo X300".
+  const reviewedTitles = new Set<string>();
+  for (const [u, e] of Object.entries(entries)) {
+    if (/-review[-_.]/i.test(u) && !isJunkSlug(u.split('/').pop() || '')) {
+      reviewedTitles.add(e.title.toLowerCase().trim());
     }
   }
 
   let newUrls = 0;
   for (const { url: u, title } of found) {
+    // Already in index — skip
     if (entries[u]) continue;
-    const slug = u.split('/').pop() || '';
-    const prefix = slug.toLowerCase().replace(/\.\d+\.0\.html$/, '');
-    if (reviewPrefixes.has(prefix)) continue;
-    entries[u] = makeEntry(u, title);
+
+    // If a review already exists with the same title, don't add the library URL
+    if (reviewedTitles.has(title.toLowerCase().trim())) continue;
+
+    // Check Redis resolve cache (warm after a resolve step — instant, no HTTP).
+    // If this library URL was previously resolved to a review URL, use that directly.
+    let finalUrl = u;
+    let finalTitle = title;
+    try {
+      const ck = `nbc:review_resolve:${u}`;
+      const cached = await rGet(ck) as string;
+      if (cached && cached !== u && /-review[-_.]/i.test(cached)) {
+        finalUrl = cached;
+        const rSlug = cached.split('/').pop() || '';
+        const raw = rSlug.split(/-review[-_.]/i)[0].replace(/-/g, ' ').trim();
+        finalTitle = raw.split(' ').map((w: string) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+      }
+    } catch { /* cache miss — store library URL as fallback */ }
+
+    // If the resolved review URL is already in the index, skip entirely
+    if (entries[finalUrl]) continue;
+
+    entries[finalUrl] = makeEntry(finalUrl, finalTitle);
     newUrls++;
   }
 
