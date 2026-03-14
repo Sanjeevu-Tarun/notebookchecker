@@ -168,18 +168,30 @@ export async function resolveLibraryUrlsPage(offset: number): Promise<{
 
       alreadyReview++;
 
-      // Review URL already in index from Source A — still delete the library duplicate
+      // Review URL already in index from Source A — update its title to the clean
+      // library title (e.g. "Vivo X300") then delete the library duplicate
       if (entries[reviewUrl]) {
+        const libTitle = entries[libraryUrl]?.title;
+        if (libTitle && libTitle.length < 60 && libTitle.length > 3) {
+          entries[reviewUrl].title = libTitle;
+        }
         delete entries[libraryUrl];
         resolved++;
         return;
       }
 
-      // Add internal review URL, drop library URL
+      // Add internal review URL using the library entry's clean title (e.g. "Vivo X300")
+      // NOT derived from the review slug which may be a descriptive article title.
+      const libraryTitle = entries[libraryUrl]?.title || '';
       const slug = reviewUrl.split('/').pop() || '';
-      const rawTitle = slug.split(/-review[-_.]/i)[0].replace(/-/g, ' ').trim();
-      const title = rawTitle.split(' ').map((w: string) =>
-        w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+      // Use library title if it's clean and short, otherwise extract from slug
+      const title = (libraryTitle && libraryTitle.length < 60 && libraryTitle.length > 3)
+        ? libraryTitle
+        : (() => {
+            const raw = slug.split(/-review[-_.]/i)[0].replace(/-/g, ' ').trim();
+            return raw.split(' ').slice(-4).map((w: string) =>
+              w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+          })();
 
       updates[reviewUrl] = {
         url: reviewUrl, title,
