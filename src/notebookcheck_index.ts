@@ -138,7 +138,7 @@ async function rSetNX(k: string, v: string, ttl: number): Promise<boolean> {
 // Paginated resolve: process BATCH_SIZE library URLs per call.
 // Each call does live HTTP fetches — must stay under Vercel 30s limit.
 // offset=0 → first batch, offset=N → next batch. Returns done:true when all resolved.
-const RESOLVE_BATCH = 5; // 5 live fetches × ~3s each = ~15s, safely under 30s limit
+const RESOLVE_BATCH = 15; // 15 parallel fetches × ~3s each = ~5s total, safe under 30s
 
 export async function resolveLibraryUrlsPage(offset: number): Promise<{
   resolved: number; alreadyReview: number; noReview: number;

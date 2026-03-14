@@ -1883,10 +1883,21 @@ async function doResolve() {
       document.getElementById('resolveLabel').textContent = offset + ' / ' + total + ' checked';
       document.getElementById('resolveStats').textContent = totalResolved + ' upgraded to review URL';
       if (d.done) {
-        document.getElementById('resolveLabel').textContent = 'done — ' + total + ' checked, ' + totalResolved + ' upgraded';
+        document.getElementById('resolveLabel').textContent = 'done — ' + total + ' checked, ' + totalResolved + ' upgraded. Running purge + rebuild…';
+        // Auto-run purge then rebuild
+        try {
+          const pr = await fetch('/api/index/purge-library-duplicates');
+          const pd = await pr.json();
+          document.getElementById('postmsg').textContent = 'purged ' + (pd.purged || 0) + ' dupes';
+        } catch(e) {}
+        try {
+          const rr = await fetch('/api/index/rebuild-search');
+          await rr.json();
+          document.getElementById('resolveLabel').textContent = 'done — ' + total + ' checked, ' + totalResolved + ' upgraded ✓ purged + rebuilt';
+        } catch(e) {}
         break;
       }
-      await sleep(400);
+      await sleep(200);
     } catch(e) { await sleep(2000); }
   }
 
