@@ -69,7 +69,7 @@ export interface CrawlProgress {
 
 // ── REDIS ─────────────────────────────────────────────────────────────────────
 
-const _rax = axios.create({ timeout: 6000 });
+const _rax = axios.create({ timeout: 30000 });
 
 function rBase() {
   const url   = process.env.UPSTASH_REDIS_REST_URL;
@@ -236,7 +236,12 @@ async function loadEntries(): Promise<Record<string, IndexEntry>> {
 }
 
 async function saveEntries(e: Record<string, IndexEntry>): Promise<void> {
-  await rSetPermanent(ENTRIES_KEY, e);
+  try {
+    await rSetPermanent(ENTRIES_KEY, e);
+  } catch (err: any) {
+    console.error('[saveEntries] FAILED — entries NOT saved:', err?.message ?? err);
+    throw err; // re-throw so callers know the save failed
+  }
 }
 
 // ── HTTP ──────────────────────────────────────────────────────────────────────
