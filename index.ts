@@ -924,6 +924,129 @@ app.get('/api/index/resolve-url', async (req, res) => {
   }
 });
 
+// /api/index/swap-all — swap ALL library URLs that have a known resolve cache entry.
+// Processes in one shot: load entries, apply all cached swaps, save once.
+// Much faster than paginated resolve — one load, one save.
+app.get('/api/index/swap-all', async (req, res) => {
+  try {
+    const axios2 = (await import('axios')).default;
+    const rUrl2   = process.env.UPSTASH_REDIS_REST_URL!;
+    const rToken2 = process.env.UPSTASH_REDIS_REST_TOKEN!;
+    const headers = { Authorization: `Bearer ${rToken2}`, 'Content-Type': 'application/json' };
+
+    // Load all entries
+    const raw = await axios2.get(`${rUrl2}/get/${encodeURIComponent('nbc:index:v3:entries')}`,
+      { headers, timeout: 30000 });
+    const entries: Record<string, any> = raw.data?.result ? JSON.parse(raw.data.result) : {};
+
+    // Find all library URLs (no -review- in URL)
+    const libraryUrls = Object.keys(entries).filter(u => !/-review[-_.]/i.test(u));
+
+    // Batch-fetch all resolve cache keys in one pipeline
+    const pipeline = libraryUrls.map(u => ['GET', `nbc:review_resolve:${u}`]);
+    const cacheResp = await axios2.post(`${rUrl2}/pipeline`, pipeline,
+      { headers, timeout: 30000 });
+
+    let swapped = 0, skipped = 0;
+    for (let i = 0; i < libraryUrls.length; i++) {
+      const libUrl = libraryUrls[i];
+      const raw2 = cacheResp.data[i]?.result;
+      if (!raw2) { skipped++; continue; }
+
+      let reviewUrl: string;
+      try { reviewUrl = JSON.parse(raw2); } catch { reviewUrl = raw2; }
+
+      if (!reviewUrl || reviewUrl === libUrl || !/-review[-_.]/i.test(reviewUrl)) {
+        skipped++; continue;
+      }
+
+      // Use library entry's clean title
+      const title = entries[libUrl]?.title || '';
+      const slug  = reviewUrl.split('/').pop() || '';
+
+      // Add review entry (or update title if already exists from Source A)
+      if (entries[reviewUrl]) {
+        if (title && title.length < 60) entries[reviewUrl].title = title;
+      } else {
+        entries[reviewUrl] = {
+          url: reviewUrl, title,
+          brand: entries[libUrl]?.brand || '',
+          slug, discoveredAt: new Date().toISOString(),
+          status: 'pending', retries: 0,
+        };
+      }
+
+      delete entries[libUrl];
+      swapped++;
+    }
+
+    if (swapped > 0) {
+      // Save in one shot
+      await axios2.post(`${rUrl2}/pipeline`,
+        [['SET', 'nbc:index:v3:entries', JSON.stringify(entries)]],
+        { headers, timeout: 30000 });
+
+      const { rebuildSearchIndex } = await import('./src/notebookcheck_index');
+      await rebuildSearchIndex();
+    }
+
+    return res.json({ success: true, swapped, skipped, total: libraryUrls.length,
+      message: `Swapped ${swapped} library URLs → review URLs. ${skipped} had no cached resolve.` });
+  } catch (e: any) {
+    return res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// /api/index/swap-url — directly swap a library URL to its review URL in the index
+// ?from=library_url&to=review_url
+// Use when resolve-one confirms the swap but the batch isn't persisting it.
+app.get('/api/index/swap-url', async (req, res) => {
+  const fromUrl = req.query.from as string;
+  const toUrl   = req.query.to   as string;
+  if (!fromUrl || !toUrl) return res.status(400).json({ success: false, error: '"from" and "to" required' });
+  try {
+    const axios2 = (await import('axios')).default;
+    const rUrl2   = process.env.UPSTASH_REDIS_REST_URL!;
+    const rToken2 = process.env.UPSTASH_REDIS_REST_TOKEN!;
+    const headers = { Authorization: `Bearer ${rToken2}`, 'Content-Type': 'application/json' };
+
+    // Load entries
+    const raw = await axios2.get(`${rUrl2}/get/${encodeURIComponent('nbc:index:v3:entries')}`, { headers });
+    const entries: Record<string, any> = raw.data?.result ? JSON.parse(raw.data.result) : {};
+
+    if (!entries[fromUrl]) return res.status(404).json({ success: false, error: 'from URL not in index', fromUrl });
+
+    // Use the library entry's clean title
+    const title = entries[fromUrl].title;
+    const slug  = toUrl.split('/').pop() || '';
+
+    // Add review URL entry
+    entries[toUrl] = {
+      url: toUrl, title,
+      brand: entries[fromUrl].brand,
+      slug, discoveredAt: new Date().toISOString(),
+      status: 'pending', retries: 0,
+    };
+
+    // Remove library URL
+    delete entries[fromUrl];
+
+    // Save back
+    await axios2.post(`${rUrl2}/pipeline`,
+      [['SET', 'nbc:index:v3:entries', JSON.stringify(entries)]],
+      { headers, timeout: 30000 });
+
+    // Rebuild search index
+    const { rebuildSearchIndex } = await import('./src/notebookcheck_index');
+    await rebuildSearchIndex();
+
+    return res.json({ success: true, swapped: true, from: fromUrl, to: toUrl, title,
+      message: `Swapped "${title}" → internal review URL and rebuilt search index` });
+  } catch (e: any) {
+    return res.status(500).json({ success: false, error: e.message });
+  }
+});
+
 // /api/index/resolve-one — force-resolve a single library URL (bypasses cache)
 // ?url=https://www.notebookcheck.net/Vivo-X300-Pro.1178848.0.html
 app.get('/api/index/resolve-one', async (req, res) => {
@@ -2101,7 +2224,7 @@ app.get('/api/index/clean-titles', async (req, res) => {
   }
 });
 
-// /api/index/rebuild-search  rebuild the fast search index from entries
+// /api/index/rebuild-search — rebuild the fast search index from entries
 app.get('/api/index/rebuild-search', async (req, res) => {
   try {
     await rebuildSearchIndex();
