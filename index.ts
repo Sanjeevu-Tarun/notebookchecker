@@ -2203,7 +2203,7 @@ app.get('/api/index/clean-titles', async (req, res) => {
     let cleaned = 0;
     for (const e of Object.values(entries) as any[]) {
       const orig = e.title as string;
-      const fixed = orig
+      let fixed = orig
         .split(/\s*[|—–:]\s*/)[0]
         .split(' - ')[0]
         .replace(/reviews?/gi, '')
