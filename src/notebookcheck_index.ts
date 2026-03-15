@@ -1214,6 +1214,70 @@ export async function searchIndex(q: string, _nq?: string): Promise<{ url: strin
   return { url: candidates[0].url, title: candidates[0].title, score: candidates[0].score };
 }
 
+// Like searchIndex but returns ALL scored candidates — used by the /api/index/candidates debug endpoint.
+export async function searchIndexAll(q: string): Promise<Array<{ url: string; title: string; slug: string; score: number; titleTokens: string; slugTokens: string }>> {
+  let flat: Array<{ url: string; title: string; slug: string }> = [];
+  try {
+    flat = await rGet(SEARCH_INDEX_KEY) as Array<{ url: string; title: string; slug: string }>;
+  } catch { return []; }
+  if (!flat?.length) return [];
+
+  const qNorm = normalizeTokens(q);
+  const rawWords = qNorm.split(/\s+/).filter(w => w.length >= 2 || /^\d+$/.test(w));
+  if (!rawWords.length) return [];
+
+  const VARIANTS = new Set([
+    'ultra','pro','plus','mini','lite','fe','max','edge',
+    'standard','turbo','fold','flip','xl','xr','se','5g','4g','go',
+  ]);
+  const queryWordSet = new Set(rawWords);
+
+  function hasExtraVariant(tokenStr: string): boolean {
+    return tokenStr.split(/\s+/).some(tw => VARIANTS.has(tw) && !queryWordSet.has(tw));
+  }
+  function wbMatch(tokens: string, w: string): boolean {
+    const escaped = w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp('(?<![a-z0-9])' + escaped + '(?![a-z0-9])').test(tokens);
+  }
+
+  const results: Array<{ url: string; title: string; slug: string; score: number; titleTokens: string; slugTokens: string }> = [];
+
+  for (const entry of flat) {
+    const titleTokens = normalizeTokens(entry.title);
+    const slugTokens  = normalizeTokens(slugToTokens(entry.slug || entry.url));
+
+    const titleHitsAll = rawWords.every(w => wbMatch(titleTokens, w));
+    const slugHitsAll  = rawWords.every(w => wbMatch(slugTokens, w));
+    if (!titleHitsAll && !slugHitsAll) continue;
+
+    const queryVariants = rawWords.filter(w => VARIANTS.has(w));
+    const slugMissingQueryVariants = queryVariants.filter(w => !wbMatch(slugTokens, w));
+    const slugCorroboratesAllVariants = slugMissingQueryVariants.length === 0;
+
+    let score = 0;
+    if (titleHitsAll && slugHitsAll) {
+      score = hasExtraVariant(titleTokens) ? 6000 : 12000;
+    } else if (titleHitsAll) {
+      if (queryVariants.length === 0) {
+        score = hasExtraVariant(titleTokens) ? 3000 : 8000;
+      } else if (slugCorroboratesAllVariants) {
+        score = 8000;
+      } else {
+        score = 1000;
+      }
+    } else if (slugHitsAll) {
+      score = hasExtraVariant(slugTokens) ? 6000 : 10000;
+    }
+
+    if (score > 0) {
+      results.push({ url: entry.url, title: entry.title, slug: entry.slug, score, titleTokens, slugTokens });
+    }
+  }
+
+  results.sort((a, b) => b.score - a.score || a.title.length - b.title.length);
+  return results;
+}
+
 
 // ── SCRAPE INDEXED DEVICE ────────────────────────────────────────────────────
 export async function clearScrapeCache(url: string): Promise<void> {

@@ -3143,7 +3143,7 @@ export async function debugNBCSearch(query: string): Promise<NBCDebugResult> {
       ? resolveSearchResult(results, nq, oq, `nbc:search:debug:${query.toLowerCase().trim()}`)
       : null;
 
-  // Stage 3: scrape (only on full cache miss with a valid URL)
+  // Stage 3: scrape(only on full cache miss with a valid URL)
   let scrapeMs = 0, scrapeOk = cacheHit || redisHit, scrapeError: string | undefined;
   if (!cacheHit && !redisHit && bestMatch) {
     const tp = Date.now();
