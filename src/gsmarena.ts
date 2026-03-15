@@ -48,9 +48,15 @@ function norm(s: string) { return s.replace(/\s+/g, ' ').trim(); }
 // ─────────────────────────────────────────────────────────────────────────────
 // SCORING — strict: ALL query words must appear in device name
 // ─────────────────────────────────────────────────────────────────────────────
+function normalizeGSMAQuery(q: string): string {
+  return q.toLowerCase().trim()
+    .replace(/\+/g, ' plus')   // s25+ -> s25 plus
+    .replace(/\s+/g, ' ').trim();
+}
+
 function scoreMatch(deviceName: string, query: string): number {
-  const d = deviceName.toLowerCase();
-  const q = query.toLowerCase().trim();
+  const d = normalizeGSMAQuery(deviceName);
+  const q = normalizeGSMAQuery(query);
   const qWords = q.split(/\s+/).filter(w => w.length > 1);
 
   // ALL words must match — if any word missing, reject entirely
@@ -80,7 +86,9 @@ function scoreMatch(deviceName: string, query: string): number {
 // Note: GSMArena autocomplete ranks by popularity not relevance — unreliable
 // ─────────────────────────────────────────────────────────────────────────────
 export async function searchGSMArena(query: string): Promise<{ name: string; url: string; id: string; score: number }[]> {
-  const ck = `gsma:search:v3:${query.toLowerCase().trim()}`;
+  const q = query.replace(/\+/g, ' plus').trim();
+  const ck = `gsma:search:v3:${q.toLowerCase().trim()}`;
+  query = q;
   const cached = getCache(ck); if (cached) return cached;
 
   // Strategy A: HTML search — accurate, returns exact model matches
