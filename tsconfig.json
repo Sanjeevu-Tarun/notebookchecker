@@ -5,7 +5,7 @@
     "lib": [
       "ES2020"
     ],
-    "strict": false,
+    "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
     "resolveJsonModule": true,

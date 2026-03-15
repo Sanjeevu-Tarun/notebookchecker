@@ -3028,14 +3028,18 @@ export async function getNotebookCheckDataFast(
 
   try {
     const tp = Date.now();
-    // scrapeNotebookCheckDevice has its own device-level cache (nbc:device:...)
-    // Detect a cache hit by timing — <100ms means it came from Redis/mem cache
+    // scrapeNotebookCheckDevice has its own device-level cache (nbc:device:...).
+    // Detect a cache hit by timing:
+    //   mem cache:       ~0ms
+    //   warm Redis:      ~50–150ms
+    //   cold Redis TLS:  ~150–350ms
+    //   live scrape:     >1000ms
+    // Use 400ms as a safe threshold that covers all Redis scenarios.
     const details = await scrapeNotebookCheckDevice(page.url, page.name);
     const scrapeMs = Date.now() - tp;
-    const deviceCached = scrapeMs < 100;
-    if (deviceCached && source === 'index') source = 'device-cache';
+    if (scrapeMs < 400) source = 'device-cache'; // cached at device level regardless of how URL was found
 
-    log('info', 'stage.scrape', { query, ms: scrapeMs, url: page.url, cached: deviceCached });
+    log('info', 'stage.scrape', { query, ms: scrapeMs, url: page.url, cached: scrapeMs < 400 });
     const result: NBCDeviceData = { ...details, pageFound: { name: page.name, url: page.url }, reviewUrl: page.url };
     log('info', 'stage.total', { query, ms: Date.now() - t0 });
     setCache(ck, result);

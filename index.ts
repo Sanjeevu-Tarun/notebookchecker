@@ -43,16 +43,24 @@ import {
 const app = express();
 app.use(cors());
 
-app.get('/api/health', (_, res) => res.json({ status: 'ok', version: 'FIX-v7-RESOLVE' }));
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const { version } = require('./package.json') as { version: string };
+app.get('/api/health', (_, res) => res.json({ status: 'ok', version }));
+
+// Shared query validator — rejects missing, non-string, or oversized queries
+function validateQ(q: unknown): string | null {
+  if (typeof q !== 'string' || !q.trim()) return null;
+  return q.trim().slice(0, 200); // cap at 200 chars to prevent giant cache keys
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // /api/phone — NotebookCheck ONLY (fast version, no GSMArena)
-// Uses Redis index (crawled) first, SearXNG fallback only on miss
+// Flow: full-result cache → Redis index → SearXNG fallback
 // ─────────────────────────────────────────────────────────────────────────────
 app.get('/api/phone', async (req, res) => {
-  const q = req.query.q as string;
+  const q = validateQ(req.query.q);
   const nocache = req.query.nocache === '1';
-  if (!q) return res.status(400).json({ success: false, error: '"q" required' });
+  if (!q) return res.status(400).json({ success: false, error: '"q" query param is required' });
 
   try {
     if (nocache) {
@@ -74,7 +82,7 @@ app.get('/api/phone', async (req, res) => {
 
 // /api/phone/debug — per-stage timing: index lookup → scrape or SearXNG fallback
 app.get('/api/phone/debug', async (req, res) => {
-  const q = (req.query.q as string) || 'samsung s25 ultra';
+  const q = (validateQ(req.query.q) ?? 'samsung s25 ultra');
   const nocache = req.query.nocache === '1';
   const t0 = Date.now();
 
@@ -135,7 +143,7 @@ app.get('/api/phone/debug', async (req, res) => {
 });
 
 app.get('/api/phone/suggestions', async (req, res) => {
-  const q = req.query.q as string;
+  const q = validateQ(req.query.q);
   if (!q) return res.status(400).json({ success: false, error: '"q" required' });
   try {
     const results = await searchGSMArena(q);
@@ -169,19 +177,19 @@ app.get('/api/device', async (req, res) => {
 
 // NotebookCheck debug endpoints
 app.get('/api/nbc/debug', async (req, res) => {
-  const q = (req.query.q as string) || 'vivo x300 pro';
+  const q = (validateQ(req.query.q) ?? 'vivo x300 pro');
   try {
     const result = await debugNBCSearch(q);
     return res.json(result);
   } catch (e: any) {
-    return res.status(500).json({ error: e.message, code: e.code });
+    return res.status(500).json({ success: false, error: e.message, code: e.code });
   }
 });
 
 
 // /api/nbc/searxng-debug — full search+scrape pipeline with per-stage timing
 app.get('/api/nbc/searxng-debug', async (req, res) => {
-  const q = (req.query.q as string) || 'oneplus 15';
+  const q = (validateQ(req.query.q) ?? 'oneplus 15');
   const t0 = Date.now();
 
   try {
@@ -240,12 +248,12 @@ app.get('/api/nbc/searxng-debug', async (req, res) => {
       },
     });
   } catch (e: any) {
-    return res.status(500).json({ error: e.message, totalMs: Date.now() - t0 });
+    return res.status(500).json({ success: false, error: e.message, totalMs: Date.now() - t0 });
   }
 });
 
 app.get('/api/nbc/suggestions', async (req, res) => {
-  const q = req.query.q as string;
+  const q = validateQ(req.query.q);
   if (!q) return res.status(400).json({ success: false, error: '"q" required' });
   try {
     const { searchNotebookCheck } = await import('./src/notebookcheck');
@@ -297,12 +305,12 @@ app.get('/', (_, res) => res.json({
 }));
 
 // ─────────────────────────────────────────────────────────────────────────────
-// KEEP-ALIVE: Ping Render SearXNG every 10 minutes to prevent cold starts.
-// Render free tier spins down after 15 min of inactivity — this prevents that.
-// Uses a lightweight /healthz ping (no search query needed, ~50ms).
+// KEEP-ALIVE: Ping Render SearXNG to prevent cold starts on the free tier.
+// Vercel is serverless — setInterval doesn't persist between requests.
+// Instead, hit /api/nbc/keepalive from an external cron (UptimeRobot, Vercel Cron, etc.)
+// every 10 minutes to keep the SearXNG Render instance warm.
 // ─────────────────────────────────────────────────────────────────────────────
 const SEARXNG_INSTANCE = 'https://searxng-notebookcheck.onrender.com';
-const PING_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
 
 async function pingSearXNG() {
   try {
@@ -325,16 +333,6 @@ async function pingSearXNG() {
   }
 }
 
-// Start pinging immediately on boot, then every 10 minutes
-pingSearXNG();
-setInterval(pingSearXNG, PING_INTERVAL_MS);
-
-// No startup index load needed — Vercel serverless reads Redis per-request
-
-// Warm processor search cache on boot — runs in background, staggered 600ms/chip.
-// This pre-populates Redis so the first real user request for popular chips
-// skips SearXNG entirely and only pays the scrape cost (~1500ms instead of ~2800ms).
-// warmProcCache removed (not exported) — processor cache warms on first request
 
 // Expose a manual ping trigger endpoint for debugging
 // /api/nbc/direct-debug?q=<device>
@@ -342,7 +340,7 @@ setInterval(pingSearXNG, PING_INTERVAL_MS);
 // Use this to verify NBC direct search is working before relying on it.
 // Example: /api/nbc/direct-debug?q=vivo+x300
 app.get('/api/nbc/direct-debug', async (req, res) => {
-  const q = (req.query.q as string) || 'vivo x300';
+  const q = (validateQ(req.query.q) ?? 'vivo x300');
   const t0 = Date.now();
 
   try {
@@ -449,7 +447,7 @@ app.get('/api/nbc/direct-debug', async (req, res) => {
       winner: articleLinks.find((l: any) => l.wouldBeUsed) || null,
     });
   } catch (e: any) {
-    return res.status(500).json({ error: e.message, totalMs: Date.now() - t0 });
+    return res.status(500).json({ success: false, error: e.message, totalMs: Date.now() - t0 });
   }
 });
 
@@ -477,7 +475,7 @@ app.get('/api/nbc/keepalive', async (_, res) => {
 
 // /api/processor?q=snapdragon+8+elite  — full search + scrape
 app.get('/api/processor', async (req, res) => {
-  const q = req.query.q as string;
+  const q = validateQ(req.query.q);
   if (!q) return res.status(400).json({ success: false, error: '"q" required' });
   try {
     const data = await getNotebookCheckProcessor(q);
@@ -496,7 +494,7 @@ app.get('/api/processor', async (req, res) => {
 
 // /api/processor/suggestions?q=snapdragon  — search-only, returns ranked list
 app.get('/api/processor/suggestions', async (req, res) => {
-  const q = req.query.q as string;
+  const q = validateQ(req.query.q);
   if (!q) return res.status(400).json({ success: false, error: '"q" required' });
   try {
     const data = await searchNotebookCheckProcessors(q);
@@ -521,7 +519,7 @@ app.get('/api/processor/device', async (req, res) => {
 
 // /api/processor/debug?q=<chip>  — staged timing: normalize → search → scrape
 app.get('/api/processor/debug', async (req, res) => {
-  const q = (req.query.q as string) || 'snapdragon 8 elite';
+  const q = (validateQ(req.query.q) ?? 'snapdragon 8 elite');
   const t0 = Date.now();
   const stages: Record<string, any> = {};
 
@@ -588,7 +586,7 @@ app.get('/api/processor/debug', async (req, res) => {
 
 // /api/processor/search?q=<chip>  — search-only timing (no scrape)
 app.get('/api/processor/search', async (req, res) => {
-  const q = (req.query.q as string) || 'snapdragon 8 elite';
+  const q = (validateQ(req.query.q) ?? 'snapdragon 8 elite');
   const t0 = Date.now();
   const nq = normalizeProcQuery(q);
   try {
@@ -602,7 +600,7 @@ app.get('/api/processor/search', async (req, res) => {
       results: sorted.slice(0, 10).map((r: any) => ({ score: r.score, title: r.title, url: r.url })),
     });
   } catch (e: any) {
-    return res.status(500).json({ error: e.message, searchMs: Date.now() - t0 });
+    return res.status(500).json({ success: false, error: e.message, searchMs: Date.now() - t0 });
   }
 });
 
@@ -2099,7 +2097,7 @@ app.get('/crawler', (_, res) => {
 // ?q=vivo+x300  → shows what searchIndex returns (or null if miss)
 // Also shows flat index size so you know if rebuild has been run.
 app.get('/api/index/search-debug', async (req, res) => {
-  const q = (req.query.q as string) || '';
+  const q = (validateQ(req.query.q) ?? '');
   try {
     const { searchIndex, rebuildSearchIndex } = await import('./src/notebookcheck_index');
     const axios2 = (await import('axios')).default;

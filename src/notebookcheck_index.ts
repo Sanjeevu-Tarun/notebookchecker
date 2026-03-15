@@ -25,7 +25,7 @@ const ENTRIES_KEY   = `nbc:index:${INDEX_VERSION}:entries`;
 const STATS_KEY     = `nbc:index:${INDEX_VERSION}:crawl_stats`;
 const LOCK_KEY      = `nbc:index:${INDEX_VERSION}:crawl_lock`;
 const PROGRESS_KEY  = `nbc:index:${INDEX_VERSION}:crawl_progress`;
-const ENTRIES_TTL   = 30 * 24 * 3600;
+const STATS_TTL     = 30 * 24 * 3600; // 30 days — crawl stats only; entries use rSetPermanent
 const LOCK_TTL      = 300;
 
 // SOURCE A — NBC Smartphones review listing (internal NBC reviews only, ~80 pages)
@@ -840,7 +840,7 @@ export async function crawlSync(startPage = 1, maxPages = 40, delayMs = 600): Pr
       totalPages: pagesRead, totalUrls: lastTotalUrls, newUrls,
       crawlMs: Date.now() - t0, lastCrawledAt: new Date().toISOString(), nextPage,
     };
-    await rSet(STATS_KEY, stats, ENTRIES_TTL);
+    await rSet(STATS_KEY, stats, STATS_TTL);
     await rDelForce([LOCK_KEY, PROGRESS_KEY]);
     return stats;
 
@@ -851,7 +851,7 @@ export async function crawlSync(startPage = 1, maxPages = 40, delayMs = 600): Pr
       crawlMs: Date.now() - t0, lastCrawledAt: new Date().toISOString(),
       error: e.message, nextPage: null,
     };
-    await rSet(STATS_KEY, stats, ENTRIES_TTL);
+    await rSet(STATS_KEY, stats, STATS_TTL);
     return stats;
   }
 }
@@ -930,22 +930,53 @@ const SEARCH_INDEX_KEY = `nbc:index:v4:search_index`;
 export async function rebuildSearchIndex(): Promise<void> {
   const entries = await loadEntries();
 
-  // Deduplicate: for each device title, always prefer the NBC internal review URL
-  // (slug contains "-review-") over the library/aggregator URL.
-  // This guards against stale library entries coexisting with upgraded review entries.
-  const byTitle = new Map<string, IndexEntry>();
+  // Deduplicate: for each device keep only the best entry.
+  // Pass 1 — title-key dedup: prefer NBC internal review URL over library URL.
+  // Pass 2 — slug-prefix dedup: if two entries share the same device name prefix
+  //   (e.g. library "samsung-galaxy-a55-5g" + review "samsung-galaxy-a55-5g-review-…")
+  //   the review URL wins even when their stored titles differ (covers the stale-title bug).
+  const byTitle  = new Map<string, IndexEntry>();
+  const byPrefix = new Map<string, IndexEntry>();
+
   for (const e of Object.values(entries) as IndexEntry[]) {
-    const key = e.title.toLowerCase().replace(/[^a-z0-9\s]/g, '').trim();
-    const existing = byTitle.get(key);
-    const isReview = /-review-/i.test(e.url);
-    if (!existing) {
-      byTitle.set(key, e);
-    } else if (isReview && !/-review-/i.test(existing.url)) {
-      byTitle.set(key, e); // upgrade to review URL
+    const isReview   = /-review[-_.]/i.test(e.url);
+    const titleKey   = e.title.toLowerCase().replace(/[^a-z0-9\s]/g, '').trim();
+    const slugPrefix = (e.slug || e.url.split('/').pop() || '')
+      .replace(/\.\d+\.0\.html$/, '')
+      .toLowerCase()
+      .split(/-review[-_.]/i)[0]
+      .replace(/-/g, ' ')
+      .trim();
+
+    // Title-key dedup
+    const exTitle = byTitle.get(titleKey);
+    if (!exTitle || (isReview && !/-review[-_.]/i.test(exTitle.url))) {
+      byTitle.set(titleKey, e);
+    }
+
+    // Slug-prefix dedup (only meaningful slugs ≥ 5 chars)
+    if (slugPrefix.length >= 5) {
+      const exSlug = byPrefix.get(slugPrefix);
+      if (!exSlug || (isReview && !/-review[-_.]/i.test(exSlug.url))) {
+        byPrefix.set(slugPrefix, e);
+      }
     }
   }
 
-  const flat = Array.from(byTitle.values()).map((e: IndexEntry) => ({ url: e.url, title: e.title, slug: e.slug }));
+  // Merge both maps — url is the unique key; review entries always beat library entries
+  const merged = new Map<string, IndexEntry>();
+  for (const e of byTitle.values())  merged.set(e.url, e);
+  for (const e of byPrefix.values()) {
+    const existing = merged.get(e.url);
+    if (!existing) merged.set(e.url, e);
+    else if (/-review[-_.]/i.test(e.url) && !/-review[-_.]/i.test(existing.url)) {
+      merged.set(e.url, e);
+    }
+  }
+
+  const flat = Array.from(merged.values()).map((e: IndexEntry) => ({
+    url: e.url, title: e.title, slug: e.slug,
+  }));
   await rSetPermanent(SEARCH_INDEX_KEY, flat);
 }
 
@@ -1131,8 +1162,10 @@ export async function scrapeIndexedDevice(url: string, title?: string): Promise<
     const t0 = Date.now();
     const data = await scrapeNotebookCheckDevice(url, title);
     const ms = Date.now() - t0;
-    // If scrape took <200ms it almost certainly came from Redis cache
-    const cached = ms < 200;
+    // Detect device-level cache hit by timing.
+    // mem cache hit: ~0ms | warm Redis hit: ~50-150ms | cold Redis (TLS): ~150-350ms
+    // Live scrape: >1000ms. Use 400ms as a safe threshold covering all cache scenarios.
+    const cached = ms < 400;
 
     // scrapeNotebookCheckDevice initialises pageFound.name to '' — fill it from index title
     if (data && title && (!data.pageFound?.name)) {
