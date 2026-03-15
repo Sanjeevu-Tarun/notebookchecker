@@ -935,75 +935,20 @@ const SEARCH_INDEX_KEY = `nbc:index:v4:search_index`;
 export async function rebuildSearchIndex(): Promise<void> {
   const entries = await loadEntries();
 
-  // Deduplicate: for each device keep only the best entry.
-  // Pass 1 — title-key dedup: prefer NBC internal review URL over library URL.
-  // Pass 2 — slug-prefix dedup: if two entries share the same device name prefix
-  //   (e.g. library "samsung-galaxy-a55-5g" + review "samsung-galaxy-a55-5g-review-…")
-  //   the review URL wins even when their stored titles differ (covers the stale-title bug).
-  const byTitle  = new Map<string, IndexEntry>();
-  const byPrefix = new Map<string, IndexEntry>();
-
-  // Variant words that distinguish models — used to make dedup keys unique per variant
-  const DEDUP_VARIANTS = [
-    'ultra','pro','plus','mini','lite','fe','max','edge',
-    'standard','turbo','fold','flip','xl','xr','se','5g','4g','go',
-  ];
-
+  // Each unique URL is its own entry — no slug-prefix dedup.
+  // Title-key dedup only removes true duplicates (same title, two URLs for same device).
+  // Prefer review URL over library URL when titles match exactly.
+  const byTitle = new Map<string, IndexEntry>();
   for (const e of Object.values(entries) as IndexEntry[]) {
-    const isReview   = /-review[-_.]/i.test(e.url);
-    // Normalise + → plus BEFORE stripping non-alnum, so "S25+" and "S25" get different keys.
-    const titleKey   = e.title.toLowerCase().replace(/\+/g, 'plus').replace(/[^a-z0-9\s]/g, '').trim();
-
-    // Slug-prefix dedup key: device name part of the slug (before "-review-").
-    // Problem: descriptive slugs like "Samsung-Galaxy-S25-review-Still-one-of-the-best..."
-    // produce slugPrefix="samsung galaxy s25" for BOTH the S25 and S25+ entries when the
-    // S25+ URL has a descriptive slug that omits "plus". This causes one to be silently dropped.
-    //
-    // Fix: append any variant words found in the TITLE but missing from the slug prefix.
-    // This makes "Samsung Galaxy S25+" produce key "samsung galaxy s25 plus" even when its
-    // URL slug has no "plus", so it never collides with the plain S25 entry.
-    const rawSlugPrefix = (e.slug || e.url.split('/').pop() || '')
-      .replace(/\.\d+\.0\.html$/, '')
-      .toLowerCase()
-      .split(/-review[-_.]/i)[0]
-      .replace(/-/g, ' ')
-      .trim();
-    const titleLower = e.title.toLowerCase().replace(/\+/g, ' plus');
-    const missingVariants = DEDUP_VARIANTS.filter(v => {
-      const re = new RegExp('(?<![a-z0-9])' + v + '(?![a-z0-9])');
-      return re.test(titleLower) && !re.test(rawSlugPrefix);
-    });
-    const slugPrefix = missingVariants.length > 0
-      ? rawSlugPrefix + ' ' + missingVariants.join(' ')
-      : rawSlugPrefix;
-
-    // Title-key dedup
-    const exTitle = byTitle.get(titleKey);
-    if (!exTitle || (isReview && !/-review[-_.]/i.test(exTitle.url))) {
+    const isReview = /-review[-_.]/i.test(e.url);
+    const titleKey = e.title.toLowerCase().replace(/\+/g, 'plus').replace(/[^a-z0-9\s]/g, '').trim();
+    const existing = byTitle.get(titleKey);
+    if (!existing || (isReview && !/-review[-_.]/i.test(existing.url))) {
       byTitle.set(titleKey, e);
     }
-
-    // Slug-prefix dedup (only meaningful slugs ≥ 5 chars)
-    if (slugPrefix.length >= 5) {
-      const exSlug = byPrefix.get(slugPrefix);
-      if (!exSlug || (isReview && !/-review[-_.]/i.test(exSlug.url))) {
-        byPrefix.set(slugPrefix, e);
-      }
-    }
   }
 
-  // Merge both maps — url is the unique key; review entries always beat library entries
-  const merged = new Map<string, IndexEntry>();
-  for (const e of byTitle.values())  merged.set(e.url, e);
-  for (const e of byPrefix.values()) {
-    const existing = merged.get(e.url);
-    if (!existing) merged.set(e.url, e);
-    else if (/-review[-_.]/i.test(e.url) && !/-review[-_.]/i.test(existing.url)) {
-      merged.set(e.url, e);
-    }
-  }
-
-  const flat = Array.from(merged.values()).map((e: IndexEntry) => ({
+  const flat = Array.from(byTitle.values()).map((e: IndexEntry) => ({
     url: e.url, title: e.title, slug: e.slug,
   }));
   await rSetPermanent(SEARCH_INDEX_KEY, flat);
