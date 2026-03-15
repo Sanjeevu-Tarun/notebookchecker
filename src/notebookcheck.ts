@@ -322,6 +322,7 @@ const CACHE_VERSION = (() => {
     'simType','esim','battery','maxChargingSpeed','cameras','ipRating','biometrics',
     'audio','sar','warrantyMonths','hasWalkieTalkie','hasIRBlaster','hasBarometer',
     'speakers','images','benchmarks',
+    '__v2',  // cache bust — forces all stale full-result and device caches to expire
   ].sort().join(',');
   // DJB2 hash — fast, deterministic, no dependencies
   let h = 5381;
