@@ -1081,26 +1081,44 @@ function slugToTokens(slugOrUrl: string): string {
 //   TIER 4 (score  3000): all query words found in slug,  some extra variants present
 //
 // Within each tier, shorter title wins (more precise match).
+
+// Normalise device name tokens before matching.
+// Handles special chars that appear in real device names:
+//   "s25+"  → "s25 plus"   (Samsung Galaxy S25+)
+//   "s25 +" → "s25 plus"   (user typed with space)
+//   "fold6" → "fold 6"     (no need — slugs already hyphenate)
+// Applied to BOTH the user query AND the stored title/slug so they speak the same language.
+function normalizeTokens(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/\+/g, ' plus')   // s25+ → s25 plus, iphone 16 pro+ → iphone 16 pro plus
+    .replace(/[()\[\]]/g, ' ') // strip brackets
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 export async function searchIndex(q: string, _nq?: string): Promise<{ url: string; title: string } | null> {
   let flat: Array<{ url: string; title: string; slug: string }> = [];
   try {
-    flat = await rGet(SEARCH_INDEX_KEY) as any[];
+    flat = await rGet(SEARCH_INDEX_KEY) as Array<{ url: string; title: string; slug: string }>;
   } catch {
     // Key missing — rebuild from entries
     await rebuildSearchIndex();
-    try { flat = await rGet(SEARCH_INDEX_KEY) as any[]; } catch { return null; }
+    try { flat = await rGet(SEARCH_INDEX_KEY) as Array<{ url: string; title: string; slug: string }>; } catch { return null; }
   }
   // If flat is empty, try rebuilding once — entries may have been added since last rebuild
   if (!flat?.length) {
     await rebuildSearchIndex();
-    try { flat = await rGet(SEARCH_INDEX_KEY) as any[]; } catch { return null; }
+    try { flat = await rGet(SEARCH_INDEX_KEY) as Array<{ url: string; title: string; slug: string }>; } catch { return null; }
   }
   if (!flat?.length) return null;
 
-  // Tokenize the raw user query — lowercase words, 2+ chars OR single digit
+  // Normalise query: "s25+" → "s25 plus" BEFORE tokenising
+  const qNorm = normalizeTokens(q);
+
+  // Tokenize the normalised query — 2+ chars OR single digit
   // Single digits are critical model discriminators: "pixel 8 pro" ≠ "pixel 9 pro".
-  // w.length >= 2 alone drops "8", "9", "3", making all "Pixel X Pro" queries identical.
-  const rawWords = q.toLowerCase().trim().split(/\s+/).filter(w =>
+  const rawWords = qNorm.split(/\s+/).filter(w =>
     w.length >= 2 || /^\d+$/.test(w)
   );
   if (!rawWords.length) return null;
@@ -1119,16 +1137,21 @@ export async function searchIndex(q: string, _nq?: string): Promise<{ url: strin
     return tokenStr.split(/\s+/).some(tw => VARIANTS.has(tw) && !queryWordSet.has(tw));
   }
 
+  // Safe word-boundary match — escapes regex metacharacters in w.
+  // After normalizeTokens, "+" is gone, but we escape anyway for safety.
+  function wbMatch(tokens: string, w: string): boolean {
+    const escaped = w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp('(?<![a-z0-9])' + escaped + '(?![a-z0-9])').test(tokens);
+  }
+
   const candidates: Array<{ url: string; title: string; score: number; titleLen: number }> = [];
 
   for (const entry of flat) {
-    const titleTokens = entry.title.toLowerCase();
-    const slugTokens  = slugToTokens(entry.slug || entry.url);
+    // Normalise stored title and slug the same way as the query.
+    // This makes "Samsung Galaxy S25+" (title) match query "s25 plus" or "s25+".
+    const titleTokens = normalizeTokens(entry.title);
+    const slugTokens  = normalizeTokens(slugToTokens(entry.slug || entry.url));
 
-    // Word-boundary match: "8" must not be part of "18", "80" etc.
-    // Query tokens from split(/\s+/) are always plain alphanumeric — no regex escaping needed.
-    const wbMatch = (tokens: string, w: string) =>
-      new RegExp('(?<![a-z0-9])' + w + '(?![a-z0-9])').test(tokens);
     const titleHitsAll = rawWords.every(w => wbMatch(titleTokens, w));
     const slugHitsAll  = rawWords.every(w => wbMatch(slugTokens, w));
 
@@ -1143,7 +1166,6 @@ export async function searchIndex(q: string, _nq?: string): Promise<{ url: strin
 
     if (slugHitsAll) {
       const slugScore = hasExtraVariant(slugTokens) ? 3000 : 8000;
-      // Take whichever signal is stronger
       if (slugScore > score) score = slugScore;
     }
 
@@ -1293,7 +1315,7 @@ export async function migrateToReviewUrls(batchSize = 200): Promise<MigrateResul
   await rSet(MIGRATE_CURSOR_KEY, newCursor, 30 * 24 * 3600);
   await rSet(MIGRATE_STATS_KEY,  stats,     30 * 24 * 3600);
 
-  // On completion:rebuild search index and clear migration state
+  // On completion: rebuild search index and clear migration state
   if (done) {
     await rebuildSearchIndex();
     await rDel(MIGRATE_CURSOR_KEY);
