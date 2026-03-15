@@ -3036,6 +3036,9 @@ export type NBCSource = 'full-cache' | 'device-cache' | 'index' | 'searxng';
 export async function getNotebookCheckDataFast(
   query: string,
 ): Promise<{ data: NBCDeviceData | NBCError; source: NBCSource } | null> {
+  // Normalise "+" to " plus" at entry — handles s25+, iphone16pro+, etc.
+  // whether the caller used encodeURIComponent or not.
+  query = query.replace(/\+/g, ' plus').replace(/\s+/g, ' ').trim();
   const ck = `nbc:full:fast:${CACHE_VERSION}:${query.toLowerCase().trim()}`;
   const t0 = Date.now();
   const oq = query.trim(), nq = normalizeQuery(query);
