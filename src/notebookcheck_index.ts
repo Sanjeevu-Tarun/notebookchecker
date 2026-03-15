@@ -1092,9 +1092,14 @@ export async function searchIndex(q: string, _nq?: string): Promise<{ url: strin
     return new RegExp('(?<![a-z0-9])' + esc + '(?![a-z0-9])').test(tokens);
   }
 
+  // Model-distinguishing variants — if a result has one of these that the query
+  // didn't ask for, it's the wrong model (e.g. query="s25", result has "plus" → skip).
+  // NOTE: 5g/4g intentionally excluded — users rarely type "5g" but almost all modern
+  // phones ARE 5G. "Samsung Galaxy A35" should match "Samsung Galaxy A35 5G".
+  // We handle the 4G vs 5G conflict separately below.
   const VARIANTS = new Set([
     'ultra','pro','plus','mini','lite','fe','max','edge',
-    'standard','turbo','fold','flip','xl','xr','se','5g','4g','go',
+    'standard','turbo','fold','flip','xl','xr','se','go',
   ]);
   const queryWordSet  = new Set(words);
   const queryVariants = words.filter(w => VARIANTS.has(w));
@@ -1104,17 +1109,23 @@ export async function searchIndex(q: string, _nq?: string): Promise<{ url: strin
     return tokens.split(/\s+/).some(tw => VARIANTS.has(tw) && !queryWordSet.has(tw));
   }
 
+  // Connectivity conflict check: only reject if query asks for one and result has the other.
+  // e.g. query="redmi note 12 4g" → reject result with "5g"; query="a35" → accept "a35 5g" ✓
+  function hasConnectivityConflict(titleTokens: string): boolean {
+    const qHas5g = queryWordSet.has('5g');
+    const qHas4g = queryWordSet.has('4g');
+    const tHas5g = /\b5g\b/i.test(titleTokens);
+    const tHas4g = /\b4g\b/i.test(titleTokens);
+    if (qHas5g && tHas4g && !tHas5g) return true; // asked for 5G, got 4G only
+    if (qHas4g && tHas5g && !tHas4g) return true; // asked for 4G, got 5G only
+    return false;
+  }
+
   // ── MATCHING LOGIC ─────────────────────────────────────────────────────────
   // Priority 1: title contains all query words -> trust it, pass the URL directly.
-  //   NBC slugs are often descriptive and don't repeat the model name — the title
-  //   is the reliable field. If title matches, we're done.
-  //
   // Priority 2: title didn't match -> try slug/URL.
-  //   Only accepted if the slug contains all query words including any variant
-  //   (slug must explicitly confirm the model when title can't).
-  //
-  // Guard (both paths): result has a variant the query didn't ask for -> wrong model, skip.
-  //   e.g. query="s25", result title has "plus" -> skip (too specific)
+  // Guard: result has a model variant the query didn't ask for -> wrong model, skip.
+  //        connectivity conflict (4G vs 5G) -> wrong variant, skip.
 
   const titleMatches: Array<{ url: string; title: string; titleLen: number }> = [];
   const slugMatches:  Array<{ url: string; title: string; titleLen: number }> = [];
@@ -1129,15 +1140,12 @@ export async function searchIndex(q: string, _nq?: string): Promise<{ url: strin
     if (!titleHitsAll && !slugHitsAll) continue;
 
     if (titleHitsAll) {
-      // Title matched — trust it completely, pass the URL as-is.
-      // Only guard: title itself has an extra variant the query didn't ask for.
-      // Slug is NOT checked here — slugs are often descriptive and irrelevant.
-      if (hasExtraVariant(titleTokens)) continue;
+      if (hasExtraVariant(titleTokens)) continue;      // wrong model variant
+      if (hasConnectivityConflict(titleTokens)) continue; // 4G vs 5G conflict
       titleMatches.push({ url: entry.url, title: entry.title, titleLen: entry.title.length });
     } else if (slugHitsAll) {
-      // Title didn't match — slug is the fallback.
-      // Only guard: slug has an extra variant the query didn't ask for.
       if (hasExtraVariant(slugTokens)) continue;
+      if (hasConnectivityConflict(slugTokens)) continue;
       slugMatches.push({ url: entry.url, title: entry.title, titleLen: entry.title.length });
     }
   }
@@ -1169,12 +1177,19 @@ export async function searchIndexAll(q: string): Promise<Array<{ url: string; ti
   }
   const VARIANTS = new Set([
     'ultra','pro','plus','mini','lite','fe','max','edge',
-    'standard','turbo','fold','flip','xl','xr','se','5g','4g','go',
+    'standard','turbo','fold','flip','xl','xr','se','go',
   ]);
   const queryWordSet  = new Set(words);
   const queryVariants = words.filter(w => VARIANTS.has(w));
   function hasExtraVariant(tokens: string): boolean {
     return tokens.split(/\s+/).some(tw => VARIANTS.has(tw) && !queryWordSet.has(tw));
+  }
+  function hasConnectivityConflict(tokens: string): boolean {
+    const qHas5g = queryWordSet.has('5g'), qHas4g = queryWordSet.has('4g');
+    const tHas5g = /\b5g\b/i.test(tokens), tHas4g = /\b4g\b/i.test(tokens);
+    if (qHas5g && tHas4g && !tHas5g) return true;
+    if (qHas4g && tHas5g && !tHas4g) return true;
+    return false;
   }
 
   const results: Array<{ url: string; title: string; slug: string; score: number; titleTokens: string; slugTokens: string }> = [];
@@ -1189,8 +1204,8 @@ export async function searchIndexAll(q: string): Promise<Array<{ url: string; ti
 
     // Title match: only check title for extra variants — slug is irrelevant.
     // Slug match: only check slug for extra variants.
-    if (titleHitsAll && hasExtraVariant(titleTokens)) continue;
-    if (!titleHitsAll && slugHitsAll && hasExtraVariant(slugTokens)) continue;
+    if (titleHitsAll && (hasExtraVariant(titleTokens) || hasConnectivityConflict(titleTokens))) continue;
+    if (!titleHitsAll && slugHitsAll && (hasExtraVariant(slugTokens) || hasConnectivityConflict(slugTokens))) continue;
 
     const score = (titleHitsAll && slugHitsAll) ? 3 : titleHitsAll ? 2 : 1;
     results.push({ url: entry.url, title: entry.title, slug: entry.slug, score, titleTokens, slugTokens });

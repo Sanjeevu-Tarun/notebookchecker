@@ -639,7 +639,10 @@ const VARIANT_WORDS = [
   'ultra','plus','mini','lite','fe','max','pro','standard','elite','turbo',
   'neo','speed','air','fold','flip','edge','note',
   // ── newly added ──
-  'xl','xr','se','5g','4g','go',
+  'xl','xr','se','go',
+  // '5g','4g' excluded — users rarely type these but most phones ARE 5G.
+  // "Samsung Galaxy A35" must match "Samsung Galaxy A35 5G".
+  // Connectivity conflicts (4G vs 5G explicitly requested) handled separately below.
   // 'compact','slim','zoom' excluded — too common in prose titles
 ] as const;
 type VariantWord = typeof VARIANT_WORDS[number];
@@ -692,13 +695,22 @@ function scoreCandidate(title: string, url: string, nq: string, originalQuery: s
   // if it is the only one available (avoids "no device found" on sparse results).
   // 'compact','slim','zoom' intentionally excluded — they appear in review title prose
   // (e.g. "Compact AI monster") and would reject valid results.
-  const HARD_REJECT_SUFFIXES: ReadonlySet<string> = new Set(['xl','xr','se','5g','4g','go']);
+  const HARD_REJECT_SUFFIXES: ReadonlySet<string> = new Set(['xl','xr','se','go']);
   for (const suffix of HARD_REJECT_SUFFIXES) {
     const re = new RegExp('\\b' + suffix + '\\b', 'i');
     const inQuery  = re.test(q) || re.test(oq);
     const inResult = re.test(combined);
-    if (!inQuery && inResult) return -1; // result has suffix user didn't ask for → wrong model
+    if (!inQuery && inResult) return -1;
   }
+  // Connectivity conflict: only reject when query explicitly requests one and result has the other.
+  // "samsung galaxy a35" → accept "a35 5g" ✓ (no conflict)
+  // "redmi note 12 4g"   → reject  "note 12 5g" ✗ (explicit 4G request, got 5G)
+  const q5g = /\b5g\b/i.test(q) || /\b5g\b/i.test(oq);
+  const q4g = /\b4g\b/i.test(q) || /\b4g\b/i.test(oq);
+  const r5g = /\b5g\b/i.test(combined);
+  const r4g = /\b4g\b/i.test(combined);
+  if (q5g && r4g && !r5g) return -1; // asked for 5G, got 4G-only result
+  if (q4g && r5g && !r4g) return -1; // asked for 4G, got 5G-only result
 
   // ── URL-slug variant corroboration (HARD REJECT) ──────────────────────────
   // The NBC URL slug is the authoritative source of device identity — it is derived
