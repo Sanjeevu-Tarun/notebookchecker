@@ -3033,10 +3033,16 @@ export async function getNotebookCheckDataFast(
     const { searchIndex } = await import('./notebookcheck_index');
     const indexHit = await searchIndex(query);
     if (indexHit) {
-      // searchIndex returns {url, title} — map title → name for scraper/pageFound
-      page = { url: indexHit.url, name: indexHit.title };
-      source = 'index';
-      log('info', 'stage.index_hit', { query, ms: Date.now() - t0, url: page.url });
+      // Score <= 1000 means the title matched but the slug contradicts the variant
+      // (e.g. title="Samsung Galaxy S25+" stored against the S25 review URL).
+      // This indicates corrupt index data — fall through to SearXNG for a reliable URL.
+      if (indexHit.score <= 1000) {
+        log('warn', 'stage.index_low_confidence', { query, ms: Date.now() - t0, url: indexHit.url, score: indexHit.score, title: indexHit.title });
+      } else {
+        page = { url: indexHit.url, name: indexHit.title };
+        source = 'index';
+        log('info', 'stage.index_hit', { query, ms: Date.now() - t0, url: page.url, score: indexHit.score });
+      }
     }
   } catch (e: any) {
     log('warn', 'stage.index_error', { query, error: e?.message });

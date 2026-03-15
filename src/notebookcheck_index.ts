@@ -1099,7 +1099,7 @@ function normalizeTokens(s: string): string {
     .trim();
 }
 
-export async function searchIndex(q: string, _nq?: string): Promise<{ url: string; title: string } | null> {
+export async function searchIndex(q: string, _nq?: string): Promise<{ url: string; title: string; score: number } | null> {
   let flat: Array<{ url: string; title: string; slug: string }> = [];
   try {
     flat = await rGet(SEARCH_INDEX_KEY) as Array<{ url: string; title: string; slug: string }>;
@@ -1160,18 +1160,46 @@ export async function searchIndex(q: string, _nq?: string): Promise<{ url: strin
     // Neither title nor slug contains all query words — skip entirely
     if (!titleHitsAll && !slugHitsAll) continue;
 
+    // VARIANT CORROBORATION:
+    // NBC sometimes stores a wrong title against a URL during crawl
+    // (e.g. title="Samsung Galaxy S25+" stored against the S25 review URL).
+    // To detect this, check whether variant words in the query (plus, ultra, fe, etc.)
+    // are corroborated by the SLUG — slugs come directly from NBC URLs and are reliable.
+    //
+    // Scoring tiers (highest wins):
+    //   12000 — title hits + slug hits + no extra variants  (perfect slug corroboration)
+    //   10000 — slug hits all + no extra variants           (slug-only, clean)
+    //    8000 — title hits + slug corroborates all variants (title+slug agree on variant)
+    //    6000 — slug hits all + has extra variants          (slug match, some extra)
+    //    5000 — title hits + slug has no extra variants but misses query variant
+    //           (may be correct if NBC slug just omits the suffix)
+    //    3000 — title hits + slug has extra variants beyond query
+    //    1000 — title hits but slug contradicts a query variant
+    //           (title/URL mismatch — use as last resort only)
+
+    // Which variant words from the query are NOT found in the slug?
+    const queryVariants = rawWords.filter(w => VARIANTS.has(w));
+    const slugMissingQueryVariants = queryVariants.filter(w => !wbMatch(slugTokens, w));
+    const slugCorroboratesAllVariants = slugMissingQueryVariants.length === 0;
+
     let score = 0;
 
-    if (titleHitsAll) {
-      // Title is the ground truth — NBC slugs often omit model suffixes like "Plus",
-      // "FE", "Ultra" (e.g. S25+ review slug just says "S25-review-...").
-      // Never penalise a full title match based on slug content.
-      score = hasExtraVariant(titleTokens) ? 5000 : 10000;
-    }
-
-    if (slugHitsAll) {
-      const slugScore = hasExtraVariant(slugTokens) ? 3000 : 8000;
-      if (slugScore > score) score = slugScore;
+    if (titleHitsAll && slugHitsAll) {
+      score = hasExtraVariant(titleTokens) ? 6000 : 12000;
+    } else if (titleHitsAll) {
+      if (queryVariants.length === 0) {
+        // No variant words in query — title match is clean
+        score = hasExtraVariant(titleTokens) ? 3000 : 8000;
+      } else if (slugCorroboratesAllVariants) {
+        // Slug also confirms the variant — high confidence
+        score = 8000;
+      } else {
+        // Slug doesn't contain the variant — possible title/URL mismatch
+        // Still include but at lower score so a slug-corroborated entry wins
+        score = 1000;
+      }
+    } else if (slugHitsAll) {
+      score = hasExtraVariant(slugTokens) ? 6000 : 10000;
     }
 
     if (score > 0) {
@@ -1183,7 +1211,7 @@ export async function searchIndex(q: string, _nq?: string): Promise<{ url: strin
 
   // Sort: highest score first, then shortest title as tiebreaker
   candidates.sort((a, b) => b.score - a.score || a.titleLen - b.titleLen);
-  return { url: candidates[0].url, title: candidates[0].title };
+  return { url: candidates[0].url, title: candidates[0].title, score: candidates[0].score };
 }
 
 
