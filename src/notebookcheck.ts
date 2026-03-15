@@ -428,6 +428,19 @@ async function redisSet(k: string, d: unknown): Promise<void> {
   } catch (e) { log('warn', 'redis.set failed', { key: k, err: (e as Error).message }); }
 }
 
+async function redisDel(k: string): Promise<void> {
+  const url   = process.env.UPSTASH_REDIS_REST_URL;
+  const token = process.env.UPSTASH_REDIS_REST_TOKEN;
+  if (!url || !token) return;
+  try {
+    await sharedAxios.post(
+      `${url}/pipeline`,
+      [['DEL', k]],
+      { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, timeout: 10000 },
+    );
+  } catch (e) { log('warn', 'redis.del failed', { key: k, err: (e as Error).message }); }
+}
+
 // getCache: mem-first, Redis fallback (warm mem on hit so next call is instant)
 async function getCache(k: string): Promise<unknown | null> {
   const mem = memGet(k);
@@ -1137,7 +1150,7 @@ function isDeviceInfoHeader(name: string): boolean {
 export async function clearDeviceCache(pageUrl: string): Promise<void> {
   const ck = `nbc:device:${CACHE_VERSION}:${pageUrl}`;
   memCache.delete(ck);
-  try { await redisSet(ck, null); } catch {}
+  await redisDel(ck);
 }
 
 // Clears the full-result cache for a query string.
@@ -1146,7 +1159,7 @@ export async function clearDeviceCache(pageUrl: string): Promise<void> {
 export async function clearFullCache(query: string): Promise<void> {
   const ck = `nbc:full:fast:${CACHE_VERSION}:${query.toLowerCase().trim()}`;
   memCache.delete(ck);
-  try { await redisSet(ck, null); } catch {}
+  await redisDel(ck);
 }
 
 export async function scrapeNotebookCheckDevice(pageUrl: string, deviceName?: string, signal?: AbortSignal): Promise<NBCDeviceData> {

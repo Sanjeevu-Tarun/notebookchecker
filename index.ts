@@ -103,7 +103,10 @@ app.get('/api/phone/debug', async (req, res) => {
     let cached = false;
 
     if (indexMatch) {
-      if (nocache) await clearScrapeCache(indexMatch.url).catch(() => {});
+      if (nocache) {
+        await clearFullCache(q).catch(() => {});
+        await clearScrapeCache(indexMatch.url).catch(() => {});
+      }
       const ts0 = Date.now();
       const result = await scrapeIndexedDevice(indexMatch.url, indexMatch.title).catch(() => null);
       indexScrapeMs = Date.now() - ts0;
@@ -307,33 +310,11 @@ app.get('/', (_, res) => res.json({
 }));
 
 // ─────────────────────────────────────────────────────────────────────────────
-// KEEP-ALIVE: Ping Render SearXNG to prevent cold starts on the free tier.
-// Vercel is serverless — setInterval doesn't persist between requests.
-// Instead, hit /api/nbc/keepalive from an external cron (UptimeRobot, Vercel Cron, etc.)
-// every 10 minutes to keep the SearXNG Render instance warm.
+// KEEP-ALIVE: /api/nbc/keepalive pings SearXNG on Render free tier.
+// Call it every 10 min via UptimeRobot (free) to prevent cold starts.
+// URL: https://your-app.vercel.app/api/nbc/keepalive
 // ─────────────────────────────────────────────────────────────────────────────
 const SEARXNG_INSTANCE = 'https://searxng-notebookcheck.onrender.com';
-
-async function pingSearXNG() {
-  try {
-    const axios = (await import('axios')).default;
-    const t0 = Date.now();
-    await axios.get(`${SEARXNG_INSTANCE}/healthz`, { timeout: 10000 });
-    console.log(`[keep-alive] SearXNG ping OK — ${Date.now() - t0}ms`);
-  } catch {
-    // Fallback: hit the search endpoint with a minimal query if /healthz not available
-    try {
-      const axios = (await import('axios')).default;
-      await axios.get(`${SEARXNG_INSTANCE}/search`, {
-        params: { q: 'ping', format: 'json' },
-        timeout: 10000,
-      });
-      console.log('[keep-alive] SearXNG fallback ping OK');
-    } catch (e: any) {
-      console.warn('[keep-alive] SearXNG ping failed:', e.message);
-    }
-  }
-}
 
 
 // Expose a manual ping trigger endpoint for debugging
