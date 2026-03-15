@@ -1075,13 +1075,32 @@ function scoreIndexMatch(entryTitle: string, query: string): number {
   return 5000 - penalty + lengthBonus;
 }
 
-// Match user query directly against clean stored titles.
-// No normalizeQuery, no aliases, no circular imports.
+// Normalise a slug or URL into a searchable token string.
+// "Samsung-Galaxy-A55-5G-review-A-lot-of-premium.835803.0.html"
+//   → "samsung galaxy a55 5g review a lot of premium"
+// Used to match query words against slug tokens when title match fails.
+function slugToTokens(slugOrUrl: string): string {
+  const slug = slugOrUrl.split('/').pop() || slugOrUrl;
+  return slug
+    .replace(/\.\d+\.0\.html$/, '')   // strip numeric id + .html
+    .replace(/[-_]/g, ' ')             // dashes/underscores → spaces
+    .toLowerCase()
+    .trim();
+}
+
+// Match user query directly against stored titles AND slug/URL.
 // Titles in Redis are already clean: "Samsung Galaxy S25 Ultra", "Google Pixel 9 Pro XL".
-// Strategy:
-//   1. All query words must appear in the title (hard filter)
-//   2. Title must not have variant words (ultra/pro/xl/...) that the query didn't ask for
-//   3. Among matches, prefer the one whose title is shortest (most specific to query)
+// However, titles can be wrong/stale (e.g. "Samsung Galaxy A50s" stored for an A55 entry).
+// The slug and URL are always authoritative — if the query words all appear in the slug,
+// that is a strong signal and should score highly regardless of the stored title.
+//
+// Strategy (scored, highest wins):
+//   TIER 1 (score 10000): all query words found in title AND title has no extra variants
+//   TIER 2 (score  8000): all query words found in slug  AND slug has no extra variants
+//   TIER 3 (score  5000): all query words found in title, some extra variants present
+//   TIER 4 (score  3000): all query words found in slug,  some extra variants present
+//
+// Within each tier, shorter title wins (more precise match).
 export async function searchIndex(q: string, _nq?: string): Promise<{ url: string; title: string } | null> {
   let flat: Array<{ url: string; title: string; slug: string }> = [];
   try {
@@ -1102,36 +1121,53 @@ export async function searchIndex(q: string, _nq?: string): Promise<{ url: strin
   const rawWords = q.toLowerCase().trim().split(/\s+/).filter(w => w.length >= 2);
   if (!rawWords.length) return null;
 
-  // Variant suffix list — if title has one of these but query doesn't, reject the entry
+  // Variant suffix list — if title/slug has one of these but query doesn't,
+  // the match is penalised (but not hard-rejected, since slug-based match is a fallback)
   const VARIANTS = new Set([
     'ultra','pro','plus','mini','lite','fe','max','edge',
     'standard','turbo','fold','flip','xl','xr','se',
     '5g','4g','go',
   ]);
 
-  const candidates: Array<{ url: string; title: string; titleLen: number }> = [];
+  const queryWordSet = new Set(rawWords);
+
+  function hasExtraVariant(tokenStr: string): boolean {
+    return tokenStr.split(/\s+/).some(tw => VARIANTS.has(tw) && !queryWordSet.has(tw));
+  }
+
+  const candidates: Array<{ url: string; title: string; score: number; titleLen: number }> = [];
 
   for (const entry of flat) {
-    const t = entry.title.toLowerCase();
+    const titleTokens = entry.title.toLowerCase();
+    const slugTokens  = slugToTokens(entry.slug || entry.url);
 
-    // Rule 1: every query word must appear in the title
-    if (!rawWords.every(w => t.includes(w))) continue;
+    const titleHitsAll = rawWords.every(w => titleTokens.includes(w));
+    const slugHitsAll  = rawWords.every(w => slugTokens.includes(w));
 
-    // Rule 2: title must not contain variant words the query didn't ask for
-    const titleWords = new Set(t.split(/\s+/));
-    const queryWords = new Set(rawWords);
-    const hasExtraVariant = [...titleWords].some(
-      tw => VARIANTS.has(tw) && !queryWords.has(tw)
-    );
-    if (hasExtraVariant) continue;
+    // Neither title nor slug contains all query words — skip entirely
+    if (!titleHitsAll && !slugHitsAll) continue;
 
-    candidates.push({ url: entry.url, title: entry.title, titleLen: entry.title.length });
+    let score = 0;
+
+    if (titleHitsAll) {
+      score = hasExtraVariant(titleTokens) ? 5000 : 10000;
+    }
+
+    if (slugHitsAll) {
+      const slugScore = hasExtraVariant(slugTokens) ? 3000 : 8000;
+      // Take whichever signal is stronger
+      if (slugScore > score) score = slugScore;
+    }
+
+    if (score > 0) {
+      candidates.push({ url: entry.url, title: entry.title, score, titleLen: entry.title.length });
+    }
   }
 
   if (!candidates.length) return null;
 
-  // Pick the shortest matching title — closest match to what the user asked for
-  candidates.sort((a, b) => a.titleLen - b.titleLen);
+  // Sort: highest score first, then shortest title as tiebreaker
+  candidates.sort((a, b) => b.score - a.score || a.titleLen - b.titleLen);
   return { url: candidates[0].url, title: candidates[0].title };
 }
 
