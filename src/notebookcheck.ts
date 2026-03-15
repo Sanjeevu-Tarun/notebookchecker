@@ -405,7 +405,7 @@ async function redisGet(k: string): Promise<unknown | null> {
   if (!url || !token) return null;
   try {
     const resp = await sharedAxios.get(`${url}/get/${encodeURIComponent(k)}`, {
-      headers: { Authorization: `Bearer ${token}` }, timeout: 8000,
+      headers: { Authorization: `Bearer ${token}` }, timeout: 20000,
     });
     const val = resp.data?.result;
     return val ? JSON.parse(val) : null;
@@ -417,10 +417,13 @@ async function redisSet(k: string, d: unknown): Promise<void> {
   const token = process.env.UPSTASH_REDIS_REST_TOKEN;
   if (!url || !token) return;
   try {
+    // 25s timeout: device data payloads (benchmarks + specs + images) can be
+    // several hundred KB. Writing them over a cold TLS connection on Vercel
+    // serverless regularly exceeds 8s, silently dropping every cache write.
     await sharedAxios.post(
       `${url}/pipeline`,
       [['SET', k, JSON.stringify(d), 'EX', CACHE_TTL_SEC]],
-      { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, timeout: 8000 },
+      { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, timeout: 25000 },
     );
   } catch (e) { log('warn', 'redis.set failed', { key: k, err: (e as Error).message }); }
 }
