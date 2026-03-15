@@ -1104,117 +1104,86 @@ export async function searchIndex(q: string, _nq?: string): Promise<{ url: strin
   try {
     flat = await rGet(SEARCH_INDEX_KEY) as Array<{ url: string; title: string; slug: string }>;
   } catch {
-    // Key missing — rebuild from entries
     await rebuildSearchIndex();
     try { flat = await rGet(SEARCH_INDEX_KEY) as Array<{ url: string; title: string; slug: string }>; } catch { return null; }
   }
-  // If flat is empty, try rebuilding once — entries may have been added since last rebuild
   if (!flat?.length) {
     await rebuildSearchIndex();
     try { flat = await rGet(SEARCH_INDEX_KEY) as Array<{ url: string; title: string; slug: string }>; } catch { return null; }
   }
   if (!flat?.length) return null;
 
-  // Normalise query: "s25+" → "s25 plus" BEFORE tokenising
+  // Normalise: "s25+" -> "s25 plus" before tokenising
   const qNorm = normalizeTokens(q);
+  // 2+ char tokens, or single digits ("pixel 8" != "pixel 9")
+  const words = qNorm.split(/\s+/).filter(w => w.length >= 2 || /^\d+$/.test(w));
+  if (!words.length) return null;
 
-  // Tokenize the normalised query — 2+ chars OR single digit
-  // Single digits are critical model discriminators: "pixel 8 pro" ≠ "pixel 9 pro".
-  const rawWords = qNorm.split(/\s+/).filter(w =>
-    w.length >= 2 || /^\d+$/.test(w)
-  );
-  if (!rawWords.length) return null;
+  // Safe word-boundary match
+  function wbMatch(tokens: string, w: string): boolean {
+    const esc = w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp('(?<![a-z0-9])' + esc + '(?![a-z0-9])').test(tokens);
+  }
 
-  // Variant suffix list — if title/slug has one of these but query doesn't,
-  // the match is penalised (but not hard-rejected, since slug-based match is a fallback)
   const VARIANTS = new Set([
     'ultra','pro','plus','mini','lite','fe','max','edge',
-    'standard','turbo','fold','flip','xl','xr','se',
-    '5g','4g','go',
+    'standard','turbo','fold','flip','xl','xr','se','5g','4g','go',
   ]);
+  const queryWordSet  = new Set(words);
+  const queryVariants = words.filter(w => VARIANTS.has(w));
 
-  const queryWordSet = new Set(rawWords);
-
-  function hasExtraVariant(tokenStr: string): boolean {
-    return tokenStr.split(/\s+/).some(tw => VARIANTS.has(tw) && !queryWordSet.has(tw));
+  // Does this token string contain a variant word the query did NOT ask for?
+  function hasExtraVariant(tokens: string): boolean {
+    return tokens.split(/\s+/).some(tw => VARIANTS.has(tw) && !queryWordSet.has(tw));
   }
 
-  // Safe word-boundary match — escapes regex metacharacters in w.
-  // After normalizeTokens, "+" is gone, but we escape anyway for safety.
-  function wbMatch(tokens: string, w: string): boolean {
-    const escaped = w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    return new RegExp('(?<![a-z0-9])' + escaped + '(?![a-z0-9])').test(tokens);
-  }
+  // ── MATCHING LOGIC ─────────────────────────────────────────────────────────
+  // Priority 1: title contains all query words  -> title match
+  // Priority 2: slug/URL contains all query words -> slug match
+  // Otherwise  : skip -> caller falls through to SearXNG
+  //
+  // Guards (applied to both paths):
+  //   a) Result has a variant the query didn't ask for -> wrong model, skip
+  //      e.g. query="s25", result title has "plus" -> skip
+  //   b) Query has variant words but slug is missing them -> slug contradicts -> skip
+  //      e.g. query="s25 plus", slug="Samsung-Galaxy-S25-review-..." -> no "plus" -> skip
+  //      Catches stale/wrong titles stored against the wrong URL during crawl.
 
-  const candidates: Array<{ url: string; title: string; score: number; titleLen: number }> = [];
+  const titleMatches: Array<{ url: string; title: string; titleLen: number }> = [];
+  const slugMatches:  Array<{ url: string; title: string; titleLen: number }> = [];
 
   for (const entry of flat) {
-    // Normalise stored title and slug the same way as the query.
-    // This makes "Samsung Galaxy S25+" (title) match query "s25 plus" or "s25+".
     const titleTokens = normalizeTokens(entry.title);
     const slugTokens  = normalizeTokens(slugToTokens(entry.slug || entry.url));
 
-    const titleHitsAll = rawWords.every(w => wbMatch(titleTokens, w));
-    const slugHitsAll  = rawWords.every(w => wbMatch(slugTokens, w));
+    const titleHitsAll = words.every(w => wbMatch(titleTokens, w));
+    const slugHitsAll  = words.every(w => wbMatch(slugTokens,  w));
 
-    // Neither title nor slug contains all query words — skip entirely
     if (!titleHitsAll && !slugHitsAll) continue;
 
-    // VARIANT CORROBORATION:
-    // NBC sometimes stores a wrong title against a URL during crawl
-    // (e.g. title="Samsung Galaxy S25+" stored against the S25 review URL).
-    // To detect this, check whether variant words in the query (plus, ultra, fe, etc.)
-    // are corroborated by the SLUG — slugs come directly from NBC URLs and are reliable.
-    //
-    // Scoring tiers (highest wins):
-    //   12000 — title hits + slug hits + no extra variants  (perfect slug corroboration)
-    //   10000 — slug hits all + no extra variants           (slug-only, clean)
-    //    8000 — title hits + slug corroborates all variants (title+slug agree on variant)
-    //    6000 — slug hits all + has extra variants          (slug match, some extra)
-    //    5000 — title hits + slug has no extra variants but misses query variant
-    //           (may be correct if NBC slug just omits the suffix)
-    //    3000 — title hits + slug has extra variants beyond query
-    //    1000 — title hits but slug contradicts a query variant
-    //           (title/URL mismatch — use as last resort only)
+    // Guard a: wrong model — result is more specific than what was asked
+    if (hasExtraVariant(titleTokens) || hasExtraVariant(slugTokens)) continue;
 
-    // Which variant words from the query are NOT found in the slug?
-    const queryVariants = rawWords.filter(w => VARIANTS.has(w));
-    const slugMissingQueryVariants = queryVariants.filter(w => !wbMatch(slugTokens, w));
-    const slugCorroboratesAllVariants = slugMissingQueryVariants.length === 0;
+    // Guard b: variant query but slug missing the variant -> definitively wrong URL
+    if (queryVariants.length > 0 && !queryVariants.every(v => wbMatch(slugTokens, v))) continue;
 
-    let score = 0;
-
-    if (titleHitsAll && slugHitsAll) {
-      score = hasExtraVariant(titleTokens) ? 6000 : 12000;
-    } else if (titleHitsAll) {
-      if (queryVariants.length === 0) {
-        // No variant words in query — title match is clean
-        score = hasExtraVariant(titleTokens) ? 3000 : 8000;
-      } else if (slugCorroboratesAllVariants) {
-        // Slug also confirms the variant — high confidence
-        score = 8000;
-      } else {
-        // Slug doesn't contain the variant — possible title/URL mismatch
-        // Still include but at lower score so a slug-corroborated entry wins
-        score = 1000;
-      }
-    } else if (slugHitsAll) {
-      score = hasExtraVariant(slugTokens) ? 6000 : 10000;
-    }
-
-    if (score > 0) {
-      candidates.push({ url: entry.url, title: entry.title, score, titleLen: entry.title.length });
+    if (titleHitsAll) {
+      titleMatches.push({ url: entry.url, title: entry.title, titleLen: entry.title.length });
+    } else {
+      slugMatches.push({ url: entry.url, title: entry.title, titleLen: entry.title.length });
     }
   }
 
-  if (!candidates.length) return null;
+  // Title match beats slug match; within each group shortest title = most precise
+  const best = titleMatches.length
+    ? titleMatches.sort((a, b) => a.titleLen - b.titleLen)[0]
+    : slugMatches.sort((a, b) => a.titleLen - b.titleLen)[0];
 
-  // Sort: highest score first, then shortest title as tiebreaker
-  candidates.sort((a, b) => b.score - a.score || a.titleLen - b.titleLen);
-  return { url: candidates[0].url, title: candidates[0].title, score: candidates[0].score };
+  if (!best) return null;
+  // score: 2 = title match, 1 = slug-only (used by getNotebookCheckDataFast to gate confidence)
+  return { url: best.url, title: best.title, score: titleMatches.length ? 2 : 1 };
 }
 
-// Like searchIndex but returns ALL scored candidates — used by the /api/index/candidates debug endpoint.
 export async function searchIndexAll(q: string): Promise<Array<{ url: string; title: string; slug: string; score: number; titleTokens: string; slugTokens: string }>> {
   let flat: Array<{ url: string; title: string; slug: string }> = [];
   try {
@@ -1223,21 +1192,21 @@ export async function searchIndexAll(q: string): Promise<Array<{ url: string; ti
   if (!flat?.length) return [];
 
   const qNorm = normalizeTokens(q);
-  const rawWords = qNorm.split(/\s+/).filter(w => w.length >= 2 || /^\d+$/.test(w));
-  if (!rawWords.length) return [];
+  const words = qNorm.split(/\s+/).filter(w => w.length >= 2 || /^\d+$/.test(w));
+  if (!words.length) return [];
 
+  function wbMatch(tokens: string, w: string): boolean {
+    const esc = w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp('(?<![a-z0-9])' + esc + '(?![a-z0-9])').test(tokens);
+  }
   const VARIANTS = new Set([
     'ultra','pro','plus','mini','lite','fe','max','edge',
     'standard','turbo','fold','flip','xl','xr','se','5g','4g','go',
   ]);
-  const queryWordSet = new Set(rawWords);
-
-  function hasExtraVariant(tokenStr: string): boolean {
-    return tokenStr.split(/\s+/).some(tw => VARIANTS.has(tw) && !queryWordSet.has(tw));
-  }
-  function wbMatch(tokens: string, w: string): boolean {
-    const escaped = w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    return new RegExp('(?<![a-z0-9])' + escaped + '(?![a-z0-9])').test(tokens);
+  const queryWordSet  = new Set(words);
+  const queryVariants = words.filter(w => VARIANTS.has(w));
+  function hasExtraVariant(tokens: string): boolean {
+    return tokens.split(/\s+/).some(tw => VARIANTS.has(tw) && !queryWordSet.has(tw));
   }
 
   const results: Array<{ url: string; title: string; slug: string; score: number; titleTokens: string; slugTokens: string }> = [];
@@ -1246,37 +1215,23 @@ export async function searchIndexAll(q: string): Promise<Array<{ url: string; ti
     const titleTokens = normalizeTokens(entry.title);
     const slugTokens  = normalizeTokens(slugToTokens(entry.slug || entry.url));
 
-    const titleHitsAll = rawWords.every(w => wbMatch(titleTokens, w));
-    const slugHitsAll  = rawWords.every(w => wbMatch(slugTokens, w));
+    const titleHitsAll = words.every(w => wbMatch(titleTokens, w));
+    const slugHitsAll  = words.every(w => wbMatch(slugTokens,  w));
     if (!titleHitsAll && !slugHitsAll) continue;
 
-    const queryVariants = rawWords.filter(w => VARIANTS.has(w));
-    const slugMissingQueryVariants = queryVariants.filter(w => !wbMatch(slugTokens, w));
-    const slugCorroboratesAllVariants = slugMissingQueryVariants.length === 0;
+    // Guard a: result has extra variant not in query -> wrong model
+    if (hasExtraVariant(titleTokens) || hasExtraVariant(slugTokens)) continue;
+    // Guard b: variant in query but slug missing it -> wrong URL
+    if (queryVariants.length > 0 && !queryVariants.every(v => wbMatch(slugTokens, v))) continue;
 
-    let score = 0;
-    if (titleHitsAll && slugHitsAll) {
-      score = hasExtraVariant(titleTokens) ? 6000 : 12000;
-    } else if (titleHitsAll) {
-      if (queryVariants.length === 0) {
-        score = hasExtraVariant(titleTokens) ? 3000 : 8000;
-      } else if (slugCorroboratesAllVariants) {
-        score = 8000;
-      } else {
-        score = 1000;
-      }
-    } else if (slugHitsAll) {
-      score = hasExtraVariant(slugTokens) ? 6000 : 10000;
-    }
-
-    if (score > 0) {
-      results.push({ url: entry.url, title: entry.title, slug: entry.slug, score, titleTokens, slugTokens });
-    }
+    const score = (titleHitsAll && slugHitsAll) ? 3 : titleHitsAll ? 2 : 1;
+    results.push({ url: entry.url, title: entry.title, slug: entry.slug, score, titleTokens, slugTokens });
   }
 
   results.sort((a, b) => b.score - a.score || a.title.length - b.title.length);
   return results;
 }
+
 
 
 // ── SCRAPE INDEXED DEVICE ────────────────────────────────────────────────────

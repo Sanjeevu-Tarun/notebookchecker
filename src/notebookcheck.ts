@@ -3053,16 +3053,12 @@ export async function getNotebookCheckDataFast(
     const { searchIndex } = await import('./notebookcheck_index');
     const indexHit = await searchIndex(query);
     if (indexHit) {
-      // Score <= 1000 means the title matched but the slug contradicts the variant
-      // (e.g. title="Samsung Galaxy S25+" stored against the S25 review URL).
-      // This indicates corrupt index data — fall through to SearXNG for a reliable URL.
-      if (indexHit.score <= 1000) {
-        log('warn', 'stage.index_low_confidence', { query, ms: Date.now() - t0, url: indexHit.url, score: indexHit.score, title: indexHit.title });
-      } else {
-        page = { url: indexHit.url, name: indexHit.title };
-        source = 'index';
-        log('info', 'stage.index_hit', { query, ms: Date.now() - t0, url: page.url, score: indexHit.score });
-      }
+      // score 2 = title match, score 1 = slug-only — both trustworthy.
+      // searchIndex now hard-rejects any entry whose slug contradicts a required variant,
+      // so every hit it returns is guaranteed to be the correct model.
+      page = { url: indexHit.url, name: indexHit.title };
+      source = 'index';
+      log('info', 'stage.index_hit', { query, ms: Date.now() - t0, url: page.url, score: indexHit.score });
     }
   } catch (e: any) {
     log('warn', 'stage.index_error', { query, error: e?.message });
@@ -3143,7 +3139,7 @@ export async function debugNBCSearch(query: string): Promise<NBCDebugResult> {
       ? resolveSearchResult(results, nq, oq, `nbc:search:debug:${query.toLowerCase().trim()}`)
       : null;
 
-  // Stage 3: scrape(only on full cache miss with a valid URL)
+  // Stage 3: scrape (only on full cache miss with a valid URL)
   let scrapeMs = 0, scrapeOk = cacheHit || redisHit, scrapeError: string | undefined;
   if (!cacheHit && !redisHit && bestMatch) {
     const tp = Date.now();
