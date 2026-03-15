@@ -2979,26 +2979,37 @@ export async function scrapeNotebookCheckDevice(pageUrl: string, deviceName?: st
 //  PUBLIC EXPORTS
 // ══════════════════════════════════════════════════════════════════════════════
 export async function getNotebookCheckData(query: string): Promise<NBCDeviceData | NBCError | null> {
-  return getNotebookCheckDataFast(query);
+  const result = await getNotebookCheckDataFast(query);
+  return result ? result.data : null;
 }
 
-export async function getNotebookCheckDataFast(query: string): Promise<NBCDeviceData | NBCError | null> {
+// Source values returned alongside data so callers can surface where the result came from.
+export type NBCSource = 'full-cache' | 'device-cache' | 'index' | 'searxng';
+
+export async function getNotebookCheckDataFast(
+  query: string,
+): Promise<{ data: NBCDeviceData | NBCError; source: NBCSource } | null> {
   const ck = `nbc:full:fast:${CACHE_VERSION}:${query.toLowerCase().trim()}`;
   const t0 = Date.now();
   const oq = query.trim(), nq = normalizeQuery(query);
 
-  // 1. Full-result cache hit
+  // 1. Full-result cache hit (query-level cache — fastest path)
   const cached = await getCacheAs<NBCDeviceData | NBCError>(ck);
-  if (cached) { log('info', 'cache.hit', { query, elapsedMs: Date.now() - t0 }); return cached; }
+  if (cached) {
+    log('info', 'cache.hit', { query, elapsedMs: Date.now() - t0 });
+    return { data: cached, source: 'full-cache' };
+  }
 
-  // 2. Redis index lookup — uses the crawled NBC index, instant, no HTTP
+  // 2. Redis index lookup — uses the crawled NBC index, no HTTP
   let page: { name: string; url: string } | null = null;
+  let source: NBCSource = 'searxng';
   try {
     const { searchIndex } = await import('./notebookcheck_index');
     const indexHit = await searchIndex(query);
     if (indexHit) {
       // searchIndex returns {url, title} — map title → name for scraper/pageFound
       page = { url: indexHit.url, name: indexHit.title };
+      source = 'index';
       log('info', 'stage.index_hit', { query, ms: Date.now() - t0, url: page.url });
     }
   } catch (e: any) {
@@ -3012,18 +3023,26 @@ export async function getNotebookCheckDataFast(query: string): Promise<NBCDevice
     if (!searchResults.length) return null;
     const searchCk = `nbc:search:fast:${CACHE_VERSION}:${query.toLowerCase().trim()}`;
     page = resolveSearchResult(searchResults, nq, oq, searchCk);
+    source = 'searxng';
   }
 
   try {
     const tp = Date.now();
+    // scrapeNotebookCheckDevice has its own device-level cache (nbc:device:...)
+    // Detect a cache hit by timing — <100ms means it came from Redis/mem cache
     const details = await scrapeNotebookCheckDevice(page.url, page.name);
-    log('info', 'stage.scrape', { query, ms: Date.now() - tp, url: page.url });
+    const scrapeMs = Date.now() - tp;
+    const deviceCached = scrapeMs < 100;
+    if (deviceCached && source === 'index') source = 'device-cache';
+
+    log('info', 'stage.scrape', { query, ms: scrapeMs, url: page.url, cached: deviceCached });
     const result: NBCDeviceData = { ...details, pageFound: { name: page.name, url: page.url }, reviewUrl: page.url };
     log('info', 'stage.total', { query, ms: Date.now() - t0 });
-    setCache(ck, result); return result;
+    setCache(ck, result);
+    return { data: result, source };
   } catch (e: any) {
     const err: NBCError = { error: e?.message ?? String(e), query, code: e?.response?.status };
-    return err;
+    return { data: err, source };
   }
 }
 

@@ -61,10 +61,11 @@ app.get('/api/phone', async (req, res) => {
       if (best) await clearScrapeCache(best.url).catch(() => {});
     }
 
-    const data = await getNotebookCheckDataFast(q);
-    if (!data) return res.status(404).json({ success: false, error: 'Device not found' });
-    if ('error' in data) return res.status(502).json({ success: false, ...data });
-    return res.json({ success: true, data });
+    const result = await getNotebookCheckDataFast(q);
+    if (!result) return res.status(404).json({ success: false, error: 'Device not found' });
+    const { data, source } = result;
+    if ('error' in data) return res.status(502).json({ success: false, source, ...data });
+    return res.json({ success: true, source, data });
 
   } catch (e: any) {
     return res.status(500).json({ success: false, error: e.message });
@@ -106,9 +107,10 @@ app.get('/api/phone/debug', async (req, res) => {
     // Stage 2: SearXNG fallback only if index missed or scrape failed
     if (!data) {
       const ts0 = Date.now();
-      data = await getNotebookCheckDataFast(q).catch(() => null);
+      const fallback = await getNotebookCheckDataFast(q).catch(() => null);
       searxngMs = Date.now() - ts0;
-      source = 'searxng-fallback';
+      data = fallback?.data ?? null;
+      source = fallback?.source ?? 'searxng-fallback';
     }
 
     return res.json({
