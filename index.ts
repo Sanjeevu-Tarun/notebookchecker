@@ -1,6 +1,6 @@
 import express from 'express';
 import cors from 'cors';
-import { getNotebookCheckData, searchNotebookCheck, scrapeNotebookCheckDevice, debugNBCSearch } from './src/notebookcheck';
+import { getNotebookCheckDataFast, scrapeNotebookCheckDevice, debugNBCSearch } from './src/notebookcheck';
 import { getGSMArenaData, searchGSMArena, scrapeGSMArenaDevice } from './src/gsmarena';
 import {
   getNotebookCheckProcessor,
@@ -47,7 +47,7 @@ app.get('/api/health', (_, res) => res.json({ status: 'ok', version: 'FIX-v7-RES
 
 // ─────────────────────────────────────────────────────────────────────────────
 // /api/phone — NotebookCheck ONLY (fast version, no GSMArena)
-// Uses Brave + SearXNG search, guaranteed <5s response
+// Uses Redis index (crawled) first, SearXNG fallback only on miss
 // ─────────────────────────────────────────────────────────────────────────────
 app.get('/api/phone', async (req, res) => {
   const q = req.query.q as string;
@@ -55,117 +55,80 @@ app.get('/api/phone', async (req, res) => {
   if (!q) return res.status(400).json({ success: false, error: '"q" required' });
 
   try {
-    // ── Step 1: local index search (fast, no external call) ──────────────────────────────
-    const { scrapeIndexedDevice, searchIndex, clearScrapeCache } = await import('./src/notebookcheck_index');
-    const best = await searchIndex(q);
-
-    if (best) {
-      if (nocache) await clearScrapeCache(best.url).catch(() => {});
-      const result = await scrapeIndexedDevice(best.url);
-      if (result.success) {
-        return res.json({ success: true, source: result.cached ? 'cache' : 'index', cached: result.cached, matchedUrl: best.url, matchedTitle: best.title, data: result.data });
-      }
-      // Index matched but scrape failed — fall through to SearXNG
+    if (nocache) {
+      const { clearScrapeCache, searchIndex } = await import('./src/notebookcheck_index');
+      const best = await searchIndex(q).catch(() => null);
+      if (best) await clearScrapeCache(best.url).catch(() => {});
     }
 
-    // ── Step 2: SearXNG fallback — ONLY reached when index misses or scrape fails ──────────────
-    // Not run in parallel — only fires when index has no match for this query.
-    const { getNotebookCheckDataFast } = await import('./src/notebookcheck');
     const data = await getNotebookCheckDataFast(q);
     if (!data) return res.status(404).json({ success: false, error: 'Device not found' });
-    return res.json({ success: true, source: 'searxng', data });
+    if ('error' in data) return res.status(502).json({ success: false, ...data });
+    return res.json({ success: true, data });
 
   } catch (e: any) {
     return res.status(500).json({ success: false, error: e.message });
   }
 });
 
-// /api/phone/debug — full timing breakdown: index lookup → scrape → fallback to SearXNG
+// /api/phone/debug — per-stage timing: index lookup → scrape or SearXNG fallback
 app.get('/api/phone/debug', async (req, res) => {
   const q = (req.query.q as string) || 'samsung s25 ultra';
   const nocache = req.query.nocache === '1';
   const t0 = Date.now();
 
-  const { searchIndex, scrapeIndexedDevice, clearScrapeCache, rebuildSearchIndex } = await import('./src/notebookcheck_index');
-
-  // ── Step 1: Index search ──────────────────────────────────────────────────
-  const ti0 = Date.now();
-  const indexMatch = await searchIndex(q).catch(() => null);
-  const indexSearchMs = Date.now() - ti0;
-
-  let source: string;
-  let data: any = null;
-  let indexScrapeMs = 0;
-  let searxngMs = 0;
-  let cached = false;
-
-  if (indexMatch) {
-    // ── Step 2: Scrape the matched URL (or return from cache) ─────────────
-    if (nocache) await clearScrapeCache(indexMatch.url).catch(() => {});
-    const ts0 = Date.now();
-    const result = await scrapeIndexedDevice(indexMatch.url).catch(() => null);
-    indexScrapeMs = Date.now() - ts0;
-
-    if (result?.success) {
-      data = result.data;
-      cached = !!result.cached;
-      source = cached ? 'redis-cache' : 'index-scrape';
-    }
-  }
-
-  // ── Step 3: SearXNG fallback if index missed or scrape failed ─────────
-  if (!data) {
-    const { getNotebookCheckDataFast } = await import('./src/notebookcheck');
-    const ts0 = Date.now();
-    data = await getNotebookCheckDataFast(q).catch(() => null);
-    searxngMs = Date.now() - ts0;
-    source = 'searxng-fallback';
-  }
-
-  const totalMs = Date.now() - t0;
-
-  res.json({
-    query: q,
-    source,
-    totalMs,
-    timing: {
-      indexSearchMs,
-      indexScrapeMs: indexScrapeMs || undefined,
-      searxngMs: searxngMs || undefined,
-    },
-    cached,
-    indexMatch: indexMatch ? { url: indexMatch.url, title: indexMatch.title } : null,
-    result: data ? {
-      title: data.title,
-      url: data.reviewUrl || data.sourceUrl,
-      rating: data.rating,
-      hasBenchmarks: data.benchmarks ? Object.values(data.benchmarks).some((b: any) => b.length > 0) : false,
-      hasSpecs: data.specs ? Object.keys(data.specs).length > 2 : false,
-      imageCounts: data.images ? {
-        device: data.images.device?.length || 0,
-        cameraSamples: data.images.cameraSamples?.length || 0,
-        screenshots: data.images.screenshots?.length || 0,
-        charts: data.images.charts?.length || 0,
-      } : null,
-    } : null,
-    error: data ? undefined : 'Not found in index or SearXNG',
-  });
-});
-
-
-app.get('/api/phone/race', async (req, res) => {
-  const q = (req.query.q as string) || 'iphone 17 pro max';
-  const t0 = Date.now();
-  
   try {
-    const { getNotebookCheckDataFast } = await import('./src/notebookcheck');
-    const data = await getNotebookCheckDataFast(q);
-    const elapsedMs = Date.now() - t0;
-    
-    if (!data) return res.status(404).json({ query: q, winner: 'none', elapsedMs });
-    return res.json({ query: q, winner: 'notebookcheck', elapsedMs, title: (data as any)?.title });
+    const { searchIndex, scrapeIndexedDevice, clearScrapeCache } = await import('./src/notebookcheck_index');
+
+    // Stage 1: index lookup
+    const ti0 = Date.now();
+    const indexMatch = await searchIndex(q).catch(() => null);
+    const indexSearchMs = Date.now() - ti0;
+
+    let source = 'none';
+    let data: any = null;
+    let indexScrapeMs = 0;
+    let searxngMs = 0;
+    let cached = false;
+
+    if (indexMatch) {
+      if (nocache) await clearScrapeCache(indexMatch.url).catch(() => {});
+      const ts0 = Date.now();
+      const result = await scrapeIndexedDevice(indexMatch.url, indexMatch.title).catch(() => null);
+      indexScrapeMs = Date.now() - ts0;
+      if (result?.success) {
+        data = result.data;
+        cached = !!result.cached;
+        source = cached ? 'redis-cache' : 'index-scrape';
+      }
+    }
+
+    // Stage 2: SearXNG fallback only if index missed or scrape failed
+    if (!data) {
+      const ts0 = Date.now();
+      data = await getNotebookCheckDataFast(q).catch(() => null);
+      searxngMs = Date.now() - ts0;
+      source = 'searxng-fallback';
+    }
+
+    return res.json({
+      query: q, source, totalMs: Date.now() - t0,
+      timing: { indexSearchMs, indexScrapeMs: indexScrapeMs || undefined, searxngMs: searxngMs || undefined },
+      cached,
+      indexMatch: indexMatch ? { url: indexMatch.url, title: indexMatch.title } : null,
+      result: data ? {
+        title: data.title, url: data.reviewUrl || data.sourceUrl, rating: data.rating,
+        hasBenchmarks: data.benchmarks ? Object.values(data.benchmarks).some((b: any) => b.length > 0) : false,
+        hasSpecs: data.specs ? Object.keys(data.specs).length > 2 : false,
+        imageCounts: data.images ? {
+          device: data.images.device?.length || 0, cameraSamples: data.images.cameraSamples?.length || 0,
+          screenshots: data.images.screenshots?.length || 0, charts: data.images.charts?.length || 0,
+        } : null,
+      } : null,
+      error: data ? undefined : 'Not found in index or SearXNG',
+    });
   } catch (e: any) {
-    return res.status(500).json({ error: e.message, elapsedMs: Date.now() - t0 });
+    return res.status(500).json({ success: false, error: e.message });
   }
 });
 
@@ -202,19 +165,7 @@ app.get('/api/device', async (req, res) => {
   return res.status(410).json({ success: false, error: 'Legacy endpoint removed. Use /api/nbc/device?url=<url>' });
 });
 
-// NotebookCheck endpoints
-app.get('/api/nbc/search', async (req, res) => {
-  const q = req.query.q as string;
-  if (!q) return res.status(400).json({ success: false, error: '"q" required' });
-  try {
-    const data = await getNotebookCheckData(q);
-    if (!data) return res.status(404).json({ success: false, error: 'Device not found on NotebookCheck' });
-    return res.json({ success: true, source: 'notebookcheck', data });
-  } catch (e: any) {
-    return res.status(500).json({ success: false, error: e.message, stack: e.stack?.slice(0, 500) });
-  }
-});
-
+// NotebookCheck debug endpoints
 app.get('/api/nbc/debug', async (req, res) => {
   const q = (req.query.q as string) || 'vivo x300 pro';
   try {
@@ -291,28 +242,11 @@ app.get('/api/nbc/searxng-debug', async (req, res) => {
   }
 });
 
-// /api/nbc/race — shows which NBC search strategy won (DDG vs SearXNG)
-app.get('/api/nbc/race', async (req, res) => {
-  const q = (req.query.q as string) || 'vivo x300 pro';
-  const t0 = Date.now();
-  try {
-    const suggestions = await searchNotebookCheck(q);
-    const elapsedMs = Date.now() - t0;
-    return res.json({ 
-      query: q, 
-      elapsedMs, 
-      count: suggestions.length,
-      top3: suggestions.slice(0, 3).map(s => ({ title: s.title, url: s.url, score: s.score }))
-    });
-  } catch (e: any) {
-    return res.status(500).json({ error: e.message, elapsedMs: Date.now() - t0 });
-  }
-});
-
 app.get('/api/nbc/suggestions', async (req, res) => {
   const q = req.query.q as string;
   if (!q) return res.status(400).json({ success: false, error: '"q" required' });
   try {
+    const { searchNotebookCheck } = await import('./src/notebookcheck');
     const data = await searchNotebookCheck(q);
     return res.json({ success: true, data });
   } catch (e: any) {
@@ -335,25 +269,24 @@ app.get('/api/nbc/device', async (req, res) => {
 app.get('/', (_, res) => res.json({
   status: 'ok',
   endpoints: {
-    // Phone / Device (SearXNG-based)
+    // Phone / Device — Redis index first, SearXNG fallback
     phone:            '/api/phone?q=<device>',
     phoneDebug:       '/api/phone/debug?q=<device>',
     nbcDevice:        '/api/nbc/device?url=<notebookcheck-url>',
-    nbcSuggestions:   '/api/nbc/suggestions?q=<device>',
+    nbcSuggestions:   '/api/nbc/suggestions?q=<device>   2190 SearXNG-only suggestions',
     nbcDebug:         '/api/nbc/debug?q=<device>',
-    // Index-based scraping (no SearXNG — bulk memory approach)
+    // Index management
     indexCrawlDebug:  '/api/index/crawl-debug               ← START HERE: verify NBC is reachable',
-    indexCrawl:       '/api/index/crawl?maxPages=3           ← then crawl 3 pages to test',
-    indexStatus:      '/api/index/status                     ← check crawl progress + coverage',
-    indexValidate:    '/api/index/validate?count=10          ← verify URLs are correct device pages',
+    indexCrawl:       '/api/index/crawl?maxPages=3           ← crawl N pages',
+    indexStatus:      '/api/index/status                     ← crawl progress + coverage',
+    indexValidate:    '/api/index/validate?count=10          ← verify URLs are correct',
     indexList:        '/api/index/list?status=pending&limit=20',
-    indexScrapeOne:   '/api/index/scrape-one?url=<url>       ← scrape single device (no SearXNG)',
-    indexBulkStart:   '/api/index/bulk-start?concurrency=2   ← scrape everything',
-    indexBulkAbort:   '/api/index/bulk-abort',
+    indexScrapeOne:   '/api/index/scrape-one?url=<url>       ← scrape single device',
+    indexSearchDebug: '/api/index/search-debug?q=<device>    ← verify index hit/miss',
     indexErrors:      '/api/index/errors',
     indexResetErrors: '/api/index/reset-errors',
     indexBrands:      '/api/index/brands',
-    indexReload:      '/api/index/reload                     ← restore from Redis after redeploy',
+    indexRebuild:     '/api/index/rebuild-search             ← rebuild search index',
     // Processor / SoC
     processor:            '/api/processor?q=<chip>',
     processorSuggestions: '/api/processor/suggestions?q=<chip>',
@@ -803,7 +736,9 @@ app.get('/api/index/scrape-one', async (req, res) => {
   const url = req.query.url as string;
   if (!url) return res.status(400).json({ success: false, error: '"url" required' });
   try {
-    const result = await scrapeIndexedDevice(url);
+    const { getEntry } = await import('./src/notebookcheck_index');
+    const entry = await getEntry(url).catch(() => null);
+    const result = await scrapeIndexedDevice(url, entry?.title);
     if (!result.success) return res.status(502).json({ success: false, error: result.error, url });
     return res.json({ success: true, source: 'notebookcheck_index', url, data: result.data });
   } catch (e: any) {

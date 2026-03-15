@@ -982,41 +982,6 @@ export function resolveSearchResult(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SEARCH — Redis index first, SearXNG fallback
-// ─────────────────────────────────────────────────────────────────────────────
-async function searchNBC(query: string): Promise<{ name: string; url: string } | null> {
-  const ck = `nbc:search:${CACHE_VERSION}:${query.toLowerCase().trim()}`;
-  const oq = query.trim(), nq = normalizeQuery(query);
-
-  // 1. Check result cache (fast — avoids re-searching on repeated queries)
-  const cached = await getCacheAs<{ name: string; url: string }>(ck);
-  if (cached) return cached;
-
-  // 2. Try the Redis index first — built from crawled NBC pages.
-  //    If found, cache and return immediately. No SearXNG round-trip needed.
-  try {
-    const { searchIndex } = await import('./notebookcheck_index');
-    const indexHit = await searchIndex(query);
-    if (indexHit) {
-      log('info', 'search.index_hit', { query, url: indexHit.url });
-      await setCache(ck, indexHit);
-      return indexHit;
-    }
-  } catch (e: any) {
-    log('warn', 'search.index_error', { query, error: e?.message });
-    // fall through to SearXNG
-  }
-
-  // 3. SearXNG fallback — fires only when the index has no match
-  const results = await searchViaSearXNG(nq, oq);
-  if (!results.length) return null;
-  return resolveSearchResult(results, nq, oq, ck);
-}
-
-
-
-
-// ─────────────────────────────────────────────────────────────────────────────
 // HELPERS FOR SCRAPER
 // ─────────────────────────────────────────────────────────────────────────────
 function cleanCellText($: cheerio.CheerioAPI, el: import('domhandler').Element): string {
@@ -3014,17 +2979,7 @@ export async function scrapeNotebookCheckDevice(pageUrl: string, deviceName?: st
 //  PUBLIC EXPORTS
 // ══════════════════════════════════════════════════════════════════════════════
 export async function getNotebookCheckData(query: string): Promise<NBCDeviceData | NBCError | null> {
-  const ck = `nbc:full:${CACHE_VERSION}:${query.toLowerCase().trim()}`;
-  const cached = await getCacheAs<NBCDeviceData | NBCError>(ck); if (cached) return cached;
-  const page = await searchNBC(query); if (!page) return null;
-  try {
-    const details = await scrapeNotebookCheckDevice(page.url, page.name);
-    const result: NBCDeviceData = { ...details, pageFound: { name: page.name, url: page.url }, reviewUrl: page.url };
-    setCache(ck, result); return result;
-  } catch (e: any) {
-    const err: NBCError = { error: e?.message ?? String(e), query, code: e?.response?.status };
-    return err;
-  }
+  return getNotebookCheckDataFast(query);
 }
 
 export async function getNotebookCheckDataFast(query: string): Promise<NBCDeviceData | NBCError | null> {
@@ -3042,7 +2997,8 @@ export async function getNotebookCheckDataFast(query: string): Promise<NBCDevice
     const { searchIndex } = await import('./notebookcheck_index');
     const indexHit = await searchIndex(query);
     if (indexHit) {
-      page = indexHit;
+      // searchIndex returns {url, title} — map title → name for scraper/pageFound
+      page = { url: indexHit.url, name: indexHit.title };
       log('info', 'stage.index_hit', { query, ms: Date.now() - t0, url: page.url });
     }
   } catch (e: any) {
@@ -3072,40 +3028,16 @@ export async function getNotebookCheckDataFast(query: string): Promise<NBCDevice
 }
 
 export async function searchNotebookCheck(query: string): Promise<SearchResult[]> {
+  // SearXNG-only search — used only for suggestions/debug endpoints.
   const ck = `nbc:suggestions:${CACHE_VERSION}:${query.toLowerCase().trim()}`;
   const oq = query.trim(), nq = normalizeQuery(query);
-  const [cached, results] = await Promise.all([
-    getCacheAs<SearchResult[]>(ck),
-    searchViaSearXNG(nq, oq),
-  ]);
+  const cached = await getCacheAs<SearchResult[]>(ck);
   if (cached) return cached;
+  const results = await searchViaSearXNG(nq, oq);
   if (!results.length) return [];
   const sorted = results.sort((a, b) => b.score - a.score);
   setCache(ck, sorted);
   return sorted;
-}
-
-// ── STARTUP CACHE WARM-UP ────────────────────────────────────────────────────
-// Call warmCache(queries) once at server startup to pre-populate Redis with the
-// most-queried devices so the first real requests after a deploy are fast.
-// Fire-and-forget: errors are logged but never thrown.
-// Example usage in index.ts:
-//   import { warmCache } from './notebookcheck';
-//   warmCache(['Samsung Galaxy S25', 'Google Pixel 9 Pro', 'iPhone 16 Pro']);
-export async function warmCache(queries: string[]): Promise<void> {
-  for (const q of queries) {
-    try {
-      const ck = `nbc:full:fast:${CACHE_VERSION}:${q.toLowerCase().trim()}`;
-      const cached = await getCacheAs<NBCDeviceData>(ck);
-      if (cached) { log('debug', 'warm-up: already cached', { q }); continue; }
-      log('info', 'warm-up: fetching', { q });
-      await getNotebookCheckDataFast(q);
-      // Stagger requests — don't hammer NBC or SearXNG on startup
-      await new Promise(r => setTimeout(r, 1500));
-    } catch (e) {
-      log('warn', 'warm-up: failed', { q, err: (e as Error).message });
-    }
-  }
 }
 
 export async function debugNBCSearch(query: string): Promise<NBCDebugResult> {

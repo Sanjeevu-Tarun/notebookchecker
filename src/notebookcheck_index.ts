@@ -718,8 +718,6 @@ export async function crawlSmartphonePage(page: number): Promise<CrawlPageResult
 // Stores library URLs raw — fast, Vercel-safe (no extra HTTP fetches per page).
 // After crawling, run /api/index/recover-review-urls to resolve library URLs →
 // internal NBC review URLs in bulk (uses Redis-cached resolves, very fast).
-const RESOLVE_CONCURRENCY = 5;
-
 export async function crawlChronoPage(page: number): Promise<CrawlPageResult> {
   const t0 = Date.now();
   const chronoUrl = page === 1 ? NBC_CHRONO_BASE : `${NBC_CHRONO_BASE}?&ns_page=${page}`;
@@ -1124,16 +1122,22 @@ export async function clearScrapeCache(url: string): Promise<void> {
   await clearDeviceCache(url);
 }
 
-export async function scrapeIndexedDevice(url: string): Promise<{ success: boolean; data?: any; error?: string; cached?: boolean }> {
-  // scrapeNotebookCheckDevice has its own Redis cache (nbc:device:...) — use it directly
-  // Avoids: double caching, double Redis round-trips, loading 1686 entries just for status update
+export async function scrapeIndexedDevice(url: string, title?: string): Promise<{ success: boolean; data?: any; error?: string; cached?: boolean }> {
+  // scrapeNotebookCheckDevice has its own Redis cache (nbc:device:...) — use it directly.
+  // Pass `title` as deviceName so image folder matching uses the clean device name
+  // rather than deriving it from the URL slug.
   try {
     const { scrapeNotebookCheckDevice } = await import('./notebookcheck');
     const t0 = Date.now();
-    const data = await scrapeNotebookCheckDevice(url);
+    const data = await scrapeNotebookCheckDevice(url, title);
     const ms = Date.now() - t0;
     // If scrape took <200ms it almost certainly came from Redis cache
     const cached = ms < 200;
+
+    // scrapeNotebookCheckDevice initialises pageFound.name to '' — fill it from index title
+    if (data && title && (!data.pageFound?.name)) {
+      data.pageFound = { name: title, url };
+    }
 
     return { success: true, data, cached };
   } catch (e: any) {
