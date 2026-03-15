@@ -94,7 +94,7 @@ function validateQ(q: unknown): string | null {
 // Flow: full-result cache → Redis index → SearXNG fallback
 // ─────────────────────────────────────────────────────────────────────────────
 app.get('/api/phone', async (req, res) => {
-  const q = rawQ(req) ?? validateQ(req.query.q);
+  const q = (rawQ(req) ?? validateQ(req.query.q))?.replace(/[+]/g, ' plus').replace(/\s+/g, ' ').trim() || null;
   const nocache = req.query.nocache === '1';
   if (!q) return res.status(400).json({ success: false, error: '"q" query param is required' });
 
@@ -120,7 +120,7 @@ app.get('/api/phone', async (req, res) => {
 
 // /api/phone/debug — per-stage timing: index lookup → scrape or SearXNG fallback
 app.get('/api/phone/debug', async (req, res) => {
-  const q = (rawQ(req) ?? validateQ(req.query.q) ?? 'samsung s25 ultra');
+  const q = ((rawQ(req) ?? validateQ(req.query.q) ?? 'samsung s25 ultra')).replace(/[+]/g, ' plus').replace(/\s+/g, ' ').trim();
   const nocache = req.query.nocache === '1';
   const t0 = Date.now();
 
