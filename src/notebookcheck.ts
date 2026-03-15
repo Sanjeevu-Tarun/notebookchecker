@@ -699,6 +699,26 @@ function scoreCandidate(title: string, url: string, nq: string, originalQuery: s
     if (!inQuery && inResult) return -1; // result has suffix user didn't ask for → wrong model
   }
 
+  // ── URL-slug variant corroboration (HARD REJECT) ──────────────────────────
+  // The NBC URL slug is the authoritative source of device identity — it is derived
+  // directly from the device name in the URL, not from fallible SearXNG snippets/titles.
+  // If the normalized query requires a variant word (e.g. "plus" from "s25+") but the
+  // URL slug does NOT contain it, this result is definitively the wrong model.
+  //
+  // Example: query "s25+" → nq "samsung galaxy s25 plus", requires "plus".
+  //          S25 review slug = "samsung galaxy s25 review still..."  → no "plus" → REJECT.
+  //          S25+ review slug = "samsung galaxy s25 plus review..." → has "plus" → OK.
+  //
+  // Uses the pre-normalized `q` (not `oq`) so that shorthand like "s25+" is already
+  // expanded to "samsung galaxy s25 plus" before the variant check fires.
+  //
+  // Note: only fires on clear NBC review page URLs (*.NNNNN.0.html) where the slug
+  // structure is reliable. Library/redirect pages are excluded via the !/\.\d{4,}\.0\.html/
+  // check in extractLinks, so in practice all scored URLs have reliable slugs.
+  for (const [, re] of VARIANT_RE) {
+    if (re.test(q) && !re.test(urlSlug)) return -1; // slug contradicts query variant → wrong model
+  }
+
   let score = 500;
 
   if (combined.includes(q))                            score += 2000;
