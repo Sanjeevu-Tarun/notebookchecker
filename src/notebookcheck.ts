@@ -2249,9 +2249,21 @@ export async function scrapeNotebookCheckDevice(pageUrl: string, deviceName?: st
   const extractedTks = extractedModel.toLowerCase().split(/\s+/);
   const slugTks = urlSlugName.toLowerCase().split(/\s+/);
   // Use title extraction only when it is a valid device name (brand-led, <=6 tokens)
-  // AND slug does not provide more model tokens (e.g. slug gives "Nothing Phone 3 Pro" vs title "Nothing")
+  // AND its non-brand model tokens are a superset of the slug's non-brand tokens.
+  //
+  // CRITICAL: Compare non-brand token counts, not raw token counts.
+  // e.g. title "Samsung Galaxy A50s" (1 model token: "a50s") vs
+  //      slug   "Galaxy A55 5G"      (1 model token: "a55")  — same raw length (3)
+  //      but title wins by raw count and its wrong model token then blocks all images.
+  // By comparing non-brand counts AND checking that title model tokens actually appear
+  // in the slug, we catch stale/wrong titles and fall back to the authoritative slug.
   const titleIsValid = extractedModel.length >= 3 && extractedTks.length <= 6 && BRAND_TOKENS.has(extractedTks[0]);
-  const resolvedDeviceName = (titleIsValid && extractedTks.length >= slugTks.length)
+  const titleModelTks = extractedTks.filter(t => !BRAND_TOKENS.has(t) && t.length >= 2);
+  const slugModelTks  = slugTks.filter(t => !BRAND_TOKENS.has(t) && t.length >= 2);
+  // Title is only trusted when ALL its non-brand tokens appear somewhere in the slug.
+  // If "a50s" doesn't appear in "galaxy a55 5g", the title is stale — slug wins.
+  const titleAgreesWithSlug = titleModelTks.every(t => slugTks.includes(t));
+  const resolvedDeviceName = (titleIsValid && titleAgreesWithSlug && titleModelTks.length >= slugModelTks.length)
     ? extractedModel
     : urlSlugName;
 
