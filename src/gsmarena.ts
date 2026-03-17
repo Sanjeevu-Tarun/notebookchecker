@@ -17,8 +17,7 @@ const _gsmaHttpsAgent = new (require('https').Agent)({ keepAlive: true, maxSocke
 const _gsmaAxios = require('axios').create({ httpsAgent: _gsmaHttpsAgent, maxRedirects: 5, decompress: true });
 
 // ── CACHE: mem-first, Redis fallback (same pattern as notebookcheck.ts) ───────
-const CACHE_TTL_MS  = 48 * 60 * 60 * 1000; // 48 h in ms  (mem TTL check)
-const CACHE_TTL_SEC = 48 * 60 * 60;         // 48 h in sec (Redis EX param)
+const CACHE_TTL_MS  = 30 * 24 * 60 * 60 * 1000; // 30 days (mem TTL check)
 const MEM_CACHE_MAX = 200;
 
 const _memCache = new Map<string, { data: any; time: number }>();
@@ -63,7 +62,7 @@ async function _redisSet(k: string, d: any): Promise<void> {
   try {
     await _gsmaAxios.post(
       `${url}/pipeline`,
-      [['SET', k, JSON.stringify(d), 'EX', CACHE_TTL_SEC]],
+      [['SET', k, JSON.stringify(d)]],  // no EX — persist indefinitely
       { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, timeout: 25000 },
     );
   } catch { /* non-fatal */ }
