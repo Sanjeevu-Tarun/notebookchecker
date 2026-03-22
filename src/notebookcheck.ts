@@ -26,6 +26,22 @@ import * as cheerio from 'cheerio';
 //    • Case/housing section + aPic_ → 'device'  (hero + case hardware shots)
 //    • Camera/photo section + aPic_ → 'cameraSamples'  (safety net for captionless samples)
 //
+//  FIX 8 — Lender/partner logos and NBC shared folders leaking into images.device:
+//  ─────────────────────────────────────────────────────────────────────────────
+//  ROOT CAUSE (Xiaomi 17 Ultra / any review with a loan-provider):
+//  NBC places lender/partner logos under /fileadmin/Notebooks/Leihsteller/ —
+//  a shared flat folder (no BRAND/DEVICE subfolder).
+//  COMPETITOR GUARD 1 in addImage() only fires when the URL contains a 3-level
+//  /Notebooks/BRAND/DEVICE/ path.  Because Leihsteller/ has no device subfolder
+//  the guard never activates, and the logo passes straight through into device[].
+//  FIX 8a — Explicit blocklist of known NBC shared non-device folders:
+//    /Notebooks/Leihsteller/, /Notebooks/Hersteller/, /Notebooks/Logos/,
+//    /Notebooks/Icons/, /Notebooks/Zubehoer/, /Notebooks/Sonstiges/
+//  FIX 8b — Filename-level logo guard:
+//    Any image whose basename contains "logo" (as a whole word, hyphen- or
+//    underscore-separated) is dropped regardless of folder — covers edge cases
+//    like lender logos stored in unusual paths.
+//
 //  FIX 7c — hasClearFilename gate (Pass 2):
 //    Added aPic_ to the list of filename patterns that pass the csm_ gate,
 //    so csm_aPic_* thumbnails in the Case section aren't silently dropped.
@@ -1862,6 +1878,22 @@ export async function scrapeNotebookCheckDevice(pageUrl: string, deviceName?: st
     if (/\/(darkred|lightred|midred|green|red_to_green|clear)_pixel|subpixel\.|clear\.gif/i.test(url)) return false;
     if (/\/Sonstiges\//i.test(url)) return false; // NBC's "misc assets" folder
     if (/\/flir_/i.test(url.toLowerCase())) return false; // FLIR thermal camera photos — internal test images
+    // Block NBC's shared non-device sub-folders under /Notebooks/:
+    //   Leihsteller/ = loan-provider logos (e.g. tradingshenzhen_logo_neu.jpg, nbmg_logo.jpg)
+    //   Hersteller/  = manufacturer press-kit assets shared across multiple reviews
+    //   Logos/       = brand logos
+    //   Icons/       = generic UI/spec icons
+    //   Zubehoer/    = accessories (cases, chargers) — not device photos
+    // These sit directly under /Notebooks/ with no BRAND/DEVICE subfolder so the
+    // COMPETITOR GUARD 1 below (which requires a 3-level /Notebooks/BRAND/DEVICE/ path)
+    // never fires for them.  Block them explicitly here.
+    if (/\/Notebooks\/(Leihsteller|Hersteller|Logos|Icons|Zubehoer|Sonstiges)\//i.test(url)) return false;
+    // Block any file whose name ends with _logo, _logo_neu, logo_neu, or starts with logo_
+    // These are lender/partner/brand logos regardless of which folder they live in.
+    {
+      const fname = (url.split('/').pop() || '').toLowerCase().replace(/\.(jpe?g|png|webp|gif)$/, '');
+      if (/(?:^|[_\-])logo(?:[_\-]|$)/i.test(fname)) return false;
+    }
 
     // ── COMPETITOR GUARD 1: /Notebooks/ folder path ──────────────────────────────
     // NBC stores every device's images under /fileadmin/Notebooks/BRAND/DEVICE_FOLDER/.
