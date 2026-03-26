@@ -1526,6 +1526,20 @@ app.get('/api/debug/redis', async (req, res) => {
 });
 
 module.exports = app;
+
+// ── STARTUP WARM-UP ──────────────────────────────────────────────────────────
+// Fire-and-forget ping to SearXNG on Render free tier so the cold start
+// happens at deploy/restart time, not on the first real user request.
+// The 30 s timeout is generous on purpose — we want it to actually wake up.
+(async () => {
+  try {
+    const axiosWarmup = (await import('axios')).default;
+    await axiosWarmup.get(`${SEARXNG_INSTANCE}/healthz`, { timeout: 30000 });
+  } catch {
+    // Silently ignore — best-effort. First real request will retry with 12 s timeout.
+  }
+})();
+
 // /api/debug/redis-force-unlock — directly delete ALL crawl lock keys from Redis
 app.get('/api/debug/redis-force-unlock', async (req, res) => {
   const url   = process.env.UPSTASH_REDIS_REST_URL;

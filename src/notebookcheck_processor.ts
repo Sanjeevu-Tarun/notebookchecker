@@ -373,8 +373,8 @@ function procSetCache(k: string, d: unknown): void {
 }
 
 // ── CIRCUIT BREAKER ──────────────────────────────────────────────────────────
-const PROC_CIRCUIT_FAIL_THRESHOLD = 3;
-const PROC_CIRCUIT_COOLDOWN_MS    = 5 * 60 * 1000;
+const PROC_CIRCUIT_FAIL_THRESHOLD = 6;        // tolerate cold-start timeouts before tripping
+const PROC_CIRCUIT_COOLDOWN_MS    = 60 * 1000; // 1 min cooldown — Render cold starts recover fast
 interface CircuitState { fails: number; cooldownUntil: number; }
 const procCircuitBreakers = new Map<string, CircuitState>();
 
@@ -589,7 +589,7 @@ export async function searchProcViaSearXNG(nq: string, oq: string, signal?: Abor
         categories: 'general',
       },
       headers: { 'User-Agent': procRandomUA(), 'Accept': 'application/json' },
-      timeout: 3000,   // 3s — Google responds in <2s; if it hasn't by 3s it won't
+      timeout: 12000,  // 12s — allows for Render free-tier cold start (can take 10-30s)
       signal,
     });
     return (resp.data?.results || []) as ExternalItem[];
