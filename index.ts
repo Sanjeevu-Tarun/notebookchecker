@@ -536,23 +536,24 @@ app.get('/api/processor/device', async (req, res) => {
   }
 });
 
-// /api/processor/debug?q=<chip>  — staged timing: normalize → search → scrape
+// /api/processor/debug?q=<chip>  — staged timing + verbose search trace
 app.get('/api/processor/debug', async (req, res) => {
   const q = (validateQ(req.query.q) ?? 'snapdragon 8 elite');
   const t0 = Date.now();
   const stages: Record<string, any> = {};
+  const searchTrace: Record<string, any>[] = [];  // verbose per-step log from inside searchProcViaSearXNG
 
-  // Stage 0: query normalization (synchronous, should be ~0ms)
+  // Stage 0: query normalization
   const t_norm = Date.now();
   const oq = q.trim();
   const nq = normalizeProcQuery(q);
   stages.normalize = { ms: Date.now() - t_norm, original: oq, normalized: nq };
 
-  // Stage 1: SearXNG search (main latency culprit — cold start on Render free tier)
+  // Stage 1: SearXNG search — pass searchTrace to capture every internal step
   const t_search = Date.now();
   let searchResults: any[] = [];
   try {
-    searchResults = await searchProcViaSearXNG(nq, oq);
+    searchResults = await searchProcViaSearXNG(nq, oq, undefined, searchTrace);
     stages.search = {
       ms: Date.now() - t_search,
       resultsCount: searchResults.length,
@@ -563,16 +564,16 @@ app.get('/api/processor/debug', async (req, res) => {
     };
   } catch (e: any) {
     stages.search = { ms: Date.now() - t_search, error: e.message };
-    return res.json({ query: q, cacheVersion: PROC_CACHE_VERSION, totalMs: Date.now() - t0, stages });
+    return res.json({ query: q, cacheVersion: PROC_CACHE_VERSION, totalMs: Date.now() - t0, stages, searchTrace });
   }
 
   if (!searchResults.length) {
-    return res.json({ query: q, cacheVersion: PROC_CACHE_VERSION, totalMs: Date.now() - t0, stages, result: null });
+    return res.json({ query: q, cacheVersion: PROC_CACHE_VERSION, totalMs: Date.now() - t0, stages, searchTrace, result: null });
   }
 
   const best = searchResults.sort((a: any, b: any) => b.score - a.score)[0];
 
-  // Stage 2: Page fetch + scrape (second latency source — full HTML download + parse)
+  // Stage 2: Page fetch + scrape
   const t_scrape = Date.now();
   let scraped: any = null;
   try {
@@ -593,7 +594,7 @@ app.get('/api/processor/debug', async (req, res) => {
     cacheVersion: PROC_CACHE_VERSION,
     totalMs: Date.now() - t0,
     stages,
-    // Quick summary of where time went
+    searchTrace,   // ← full step-by-step trace: request params, raw results, per-URL filter decisions
     breakdown: {
       normalizeMs: stages.normalize.ms,
       searchMs:    stages.search?.ms ?? 0,

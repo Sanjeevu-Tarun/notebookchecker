@@ -552,12 +552,16 @@ function scoreProcCandidate(title: string, url: string, nq: string, oq: string):
 }
 
 /** SearXNG search targeting NotebookCheck processor/SoC spec pages */
-export async function searchProcViaSearXNG(nq: string, oq: string, signal?: AbortSignal): Promise<ProcessorSearchResult[]> {
+export async function searchProcViaSearXNG(nq: string, oq: string, signal?: AbortSignal, debugLog?: Record<string, any>[]): Promise<ProcessorSearchResult[]> {
   const seen = new Set<string>();
   const all: ProcessorSearchResult[] = [];
   const base = process.env.SEARXNG_URL ?? 'https://searxng-notebookcheck.onrender.com';
 
-  if (procCircuitIsOpen(base)) return [];
+  if (procCircuitIsOpen(base)) {
+    debugLog?.push({ step: 'circuit_open', base, message: 'Circuit breaker is open — skipping SearXNG entirely' });
+    log('warn', 'proc.circuit.blocked', { base });
+    return [];
+  }
 
   interface ExternalItem { url?: string; href?: string; title?: string; }
 
@@ -579,18 +583,27 @@ export async function searchProcViaSearXNG(nq: string, oq: string, signal?: Abor
   const searchQuery = nq !== oq ? nq : oq;
 
   const doSearch = async (q: string): Promise<ExternalItem[]> => {
+    const params = {
+      q: `site:notebookcheck.net ${q} processor benchmarks specs`,
+      format: 'json',
+      engines: 'google,bing,duckduckgo',
+      categories: 'general',
+    };
+    debugLog?.push({ step: 'searxng_request', base, params, timeMs: Date.now() });
     const resp = await procAxios.get(`${base}/search`, {
-      params: {
-        q: `site:notebookcheck.net ${q} processor benchmarks specs`,
-        format: 'json',
-        engines: 'google,bing,duckduckgo',  // explicit — don't rely on settings.yml defaults
-        categories: 'general',
-      },
+      params,
       headers: { 'User-Agent': procRandomUA(), 'Accept': 'application/json' },
-      timeout: 25000,  // 25s — Render free-tier cold start can take 10-30s; 12s was too short
+      timeout: 25000,
       signal,
     });
-    return (resp.data?.results || []) as ExternalItem[];
+    const results = (resp.data?.results || []) as ExternalItem[];
+    debugLog?.push({
+      step: 'searxng_raw_response',
+      statusCode: resp.status,
+      rawCount: results.length,
+      rawResults: results.slice(0, 10).map((r: any) => ({ url: r.url, title: r.title })),
+    });
+    return results;
   };
 
   // ── NBC DIRECT SEARCH FALLBACK ─────────────────────────────────────────────
@@ -640,48 +653,62 @@ export async function searchProcViaSearXNG(nq: string, oq: string, signal?: Abor
       return await doSearch(q);
     } catch (e) {
       if ((e as Error).name === 'AbortError') throw e;
+      debugLog?.push({ step: 'searxng_error', query: q, error: (e as Error).message, code: (e as any)?.response?.status });
       return [];
     }
   };
 
   try {
+    debugLog?.push({ step: 'circuit_check', base, open: false });
     let items = await tryQuery(searchQuery);
+    debugLog?.push({ step: 'primary_query_done', query: searchQuery, itemsCount: items.length });
 
     // If primary returned nothing AND nq !== oq, try oq as fallback
     if (items.length === 0 && nq !== oq) {
+      debugLog?.push({ step: 'fallback_query', primary: searchQuery, fallback: oq });
       log('debug', 'proc.searxng.fallback', { primary: searchQuery, fallback: oq });
       items = await tryQuery(oq);
+      debugLog?.push({ step: 'fallback_query_done', itemsCount: items.length });
     }
 
     // Last resort: if SearXNG returned nothing, scrape NBC's own search page directly
     if (items.length === 0) {
+      debugLog?.push({ step: 'nbc_direct_search_attempt', query: searchQuery });
       log('debug', 'proc.nbc_direct_search.attempt', { query: searchQuery });
       items = await doNbcDirectSearch(nq !== oq ? nq : oq);
-      if (items.length === 0 && nq !== oq) items = await doNbcDirectSearch(oq);
+      debugLog?.push({ step: 'nbc_direct_search_done', itemsCount: items.length });
+      if (items.length === 0 && nq !== oq) {
+        items = await doNbcDirectSearch(oq);
+        debugLog?.push({ step: 'nbc_direct_search_fallback_done', itemsCount: items.length });
+      }
     }
 
     procCircuitRecordSuccess(base);
 
+    debugLog?.push({ step: 'filter_start', totalItems: items.length });
     for (const item of items) {
       const url   = (item.url || '').trim();
       const title = (item.title || '').trim();
-      if (!url.includes('notebookcheck.net') || seen.has(url)) continue;
-
-      // URL filter — accept NBC pages that look like processor spec pages.
-      // Previously this was too strict: required BOTH a 4-digit ID AND
-      // "benchmarks-and-specs" in URL. NBC SoC pages sometimes lack one.
-      // Now: accept if EITHER condition matches, or if the URL slug contains
-      // "processor" + "benchmark" (covers newer NBC URL formats).
+      if (!url.includes('notebookcheck.net') || seen.has(url)) {
+        debugLog?.push({ step: 'filter_reject', reason: 'not_nbc_or_duplicate', url, title });
+        continue;
+      }
       const urlLower = url.toLowerCase();
       const isNbcSpecPage =
         /\.\d{4,}\.\d+\.html/.test(url) ||
         /benchmarks-and-specs/i.test(url) ||
         (/processor/i.test(url) && /benchmark/i.test(url)) ||
         /soc.*spec|spec.*soc/i.test(urlLower);
-      if (!isNbcSpecPage) continue;
-
+      if (!isNbcSpecPage) {
+        debugLog?.push({ step: 'filter_reject', reason: 'not_spec_page_url', url, title });
+        continue;
+      }
       const sc = scoreProcCandidate(title || url, url, nq, oq);
-      if (sc < 0) continue;
+      if (sc < 0) {
+        debugLog?.push({ step: 'filter_reject', reason: `score_negative(${sc})`, url, title });
+        continue;
+      }
+      debugLog?.push({ step: 'filter_accept', score: sc, url, title });
       seen.add(url);
       all.push({ url, title: title || url, score: sc });
     }
